@@ -108,7 +108,7 @@ def _calculate_recency_boost(timestamp_str: str) -> float:
     """Calculate recency boost: newer memories score higher."""
     try:
         ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-        age_days = (datetime.utcnow() - ts).days
+        age_days = (datetime.now().astimezone() - ts).days
         
         if age_days < 0:
             return 1.0

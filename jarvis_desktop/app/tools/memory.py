@@ -66,7 +66,7 @@ async def _ensure_collection(http: httpx.AsyncClient) -> None:
 
 
 def _point_id(content: str) -> str:
-    seed = f"{_user_id()}|{content}|{datetime.utcnow().isoformat()}"
+    seed = f"{_user_id()}|{content}|{datetime.now().astimezone().isoformat()}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
 
@@ -86,7 +86,7 @@ def _local_store(content: str, category: str) -> None:
     memories.append({
         "content": content,
         "category": category,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now().astimezone().isoformat(),
     })
     path.write_text(json.dumps(memories, indent=2))
 
@@ -143,7 +143,7 @@ async def memory_remember(content: str, category: str = "other") -> str:
         vector = _embed(content)
         async with httpx.AsyncClient() as http:
             await _ensure_collection(http)
-            now_iso = datetime.utcnow().isoformat()
+            now_iso = datetime.now().astimezone().isoformat()
             point = {
                 "id": _point_id(content),
                 "vector": vector,

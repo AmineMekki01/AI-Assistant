@@ -12,7 +12,7 @@ import os
 from typing import List
 
 import httpx
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from ..runtime import tool
 
@@ -22,13 +22,13 @@ EMBED_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 UTILITY_MODEL = os.getenv("OPENAI_UTILITY_MODEL", "gpt-5.4-nano")
 
 
-_client: OpenAI | None = None
+_client: AsyncOpenAI | None = None
 
 
-def _get_client() -> OpenAI:
+def _get_client() -> AsyncOpenAI:
     global _client
     if _client is None:
-        _client = OpenAI()
+        _client = AsyncOpenAI()
     return _client
 
 
@@ -36,8 +36,8 @@ def _qdrant_url() -> str:
     return os.getenv("QDRANT_URL", "http://localhost:6333")
 
 
-def _embed(text: str) -> List[float]:
-    resp = _get_client().embeddings.create(model=EMBED_MODEL, input=text)
+async def _embed(text: str) -> List[float]:
+    resp = await _get_client().embeddings.create(model=EMBED_MODEL, input=text)
     return resp.data[0].embedding
 
 
@@ -76,7 +76,7 @@ async def knowledge_search(query: str, top_k: int = 5) -> str:
     if not query:
         return "Please provide a search query."
     try:
-        hits = await _qdrant_search(_embed(query), int(top_k or 5))
+        hits = await _qdrant_search(await _embed(query), int(top_k or 5))
     except RuntimeError as e:
         return f"Error: {e}"
     except Exception as e: 
@@ -117,7 +117,7 @@ async def knowledge_ask(query: str, top_k: int = 5) -> str:
 
     top = int(top_k or 5)
     try:
-        hits = await _qdrant_search(_embed(query), top)
+        hits = await _qdrant_search(await _embed(query), top)
     except RuntimeError as e:
         return f"Error: {e}"
     except Exception as e: 
@@ -149,7 +149,7 @@ async def knowledge_ask(query: str, top_k: int = 5) -> str:
     )
 
     try:
-        resp = _get_client().chat.completions.create(
+        resp = await _get_client().chat.completions.create(
             model=UTILITY_MODEL,
             messages=[
                 {"role": "system", "content": system},
