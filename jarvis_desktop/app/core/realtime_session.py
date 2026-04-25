@@ -16,9 +16,14 @@ from ..runtime import REGISTRY, load_all_capabilities
 
 log = StructuredLog(__name__)
 
-REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini"
 INPUT_SAMPLE_RATE = 16000
 OUTPUT_SAMPLE_RATE = 24000
+
+
+def _realtime_url() -> str:
+    from .config import get_settings
+    model = get_settings().openai_realtime_model
+    return f"wss://api.openai.com/v1/realtime?model={model}"
 
 def _detect_integrations() -> dict:
     """Inspect on-disk state to figure out which integrations are live."""
@@ -278,7 +283,7 @@ class RealtimeSession:
         ]
         
         self.ws = await websockets.connect(
-            REALTIME_URL,
+            _realtime_url(),
             additional_headers=headers,
             max_size=16 * 1024 * 1024,
             ping_interval=15,

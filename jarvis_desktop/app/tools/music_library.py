@@ -52,11 +52,14 @@ def _get_lock() -> asyncio.Lock:
 
 
 async def _run_osascript(script: str, timeout: float = 10.0) -> subprocess.CompletedProcess:
-    return await asyncio.get_event_loop().run_in_executor(
-        None,
-        lambda: subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, timeout=timeout,
+    return await asyncio.wait_for(
+        asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["osascript", "-e", script], capture_output=True, text=True, timeout=timeout,
+            ),
         ),
+        timeout=timeout + 1.0,
     )
 
 
