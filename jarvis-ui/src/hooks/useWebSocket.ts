@@ -1,12 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-
-export interface Message {
-  role: 'assistant' | 'user' | 'system'
-  text: string
-  timestamp: Date
-}
-
-export type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error'
+import type { BackendMessage, ConnectionState, Message } from '../types'
 
 interface WebSocketState {
   connectionState: ConnectionState
@@ -14,6 +7,30 @@ interface WebSocketState {
   messages: Message[]
   isRecording: boolean
   isSpeaking: boolean
+}
+
+function isBackendMessage(data: unknown): data is BackendMessage {
+  if (!data || typeof data !== 'object') {
+    return false
+  }
+
+  const payload = data as Record<string, unknown>
+  if (typeof payload.type !== 'string') {
+    return false
+  }
+
+  switch (payload.type) {
+    case 'status':
+      return typeof payload.state === 'string' && typeof payload.message === 'string'
+    case 'message':
+      return typeof payload.role === 'string' && typeof payload.text === 'string'
+    case 'recording':
+      return typeof payload.isRecording === 'boolean'
+    case 'speaking':
+      return typeof payload.isSpeaking === 'boolean'
+    default:
+      return false
+  }
 }
 
 export function useWebSocket(url: string) {
@@ -27,13 +44,67 @@ export function useWebSocket(url: string) {
 
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const reconnectAttemptsRef = useRef(0)
+  const manuallyClosedRef = useRef(false)
+  const outgoingQueueRef = useRef<string[]>([])
+
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current)
+      reconnectTimeoutRef.current = null
+    }
+  }, [])
+
+  const flushOutgoingQueue = useCallback(() => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN || outgoingQueueRef.current.length === 0) {
+      return
+    }
+
+    const pending = outgoingQueueRef.current
+    outgoingQueueRef.current = []
+
+    for (const payload of pending) {
+      try {
+        ws.send(payload)
+      } catch (error) {
+        outgoingQueueRef.current.unshift(payload)
+        console.warn('Failed to flush queued websocket message', error)
+        break
+      }
+    }
+  }, [])
+
+  const enqueueOrSend = useCallback((payload: string) => {
+    const ws = wsRef.current
+    if (ws?.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(payload)
+        return true
+      } catch (error) {
+        console.warn('WebSocket send failed, queueing payload for retry', error)
+      }
+    }
+
+    outgoingQueueRef.current.push(payload)
+    return false
+  }, [])
 
   const connect = useCallback(() => {
+    if (manuallyClosedRef.current) {
+      return
+    }
+
+    clearReconnectTimer()
+
     const ws = new WebSocket(url)
     wsRef.current = ws
 
     ws.onopen = () => {
       console.log('Connected to JARVIS backend')
+      reconnectAttemptsRef.current = 0
+      clearReconnectTimer()
+      flushOutgoingQueue()
       setState(prev => ({
         ...prev,
         connectionState: 'connected',
@@ -42,6 +113,10 @@ export function useWebSocket(url: string) {
     }
 
     ws.onclose = () => {
+      if (manuallyClosedRef.current) {
+        return
+      }
+
       console.log('Disconnected from JARVIS backend')
       setState(prev => ({
         ...prev,
@@ -50,7 +125,10 @@ export function useWebSocket(url: string) {
       }))
       wsRef.current = null
       
-      reconnectTimeoutRef.current = setTimeout(connect, 3000)
+      reconnectAttemptsRef.current += 1
+      const delay = Math.min(3000 * reconnectAttemptsRef.current, 15000)
+      clearReconnectTimer()
+      reconnectTimeoutRef.current = setTimeout(connect, delay)
     }
 
     ws.onerror = () => {
@@ -62,20 +140,31 @@ export function useWebSocket(url: string) {
     }
 
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data)
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(event.data)
+      } catch {
+        console.warn('Ignoring malformed backend message')
+        return
+      }
 
-      switch (data.type) {
+      if (!isBackendMessage(parsed)) {
+        console.warn('Ignoring unknown backend message shape', parsed)
+        return
+      }
+
+      switch (parsed.type) {
         case 'message':
           setState(prev => {
             const lastMsg = prev.messages[prev.messages.length - 1]
-            if (lastMsg && lastMsg.role === data.role && data.role === 'assistant') {
+            if (lastMsg && lastMsg.role === parsed.role && parsed.role === 'assistant') {
               return {
                 ...prev,
                 messages: [
                   ...prev.messages.slice(0, -1),
                   {
-                    role: data.role,
-                    text: data.text,
+                    role: parsed.role,
+                    text: parsed.text,
                     timestamp: lastMsg.timestamp
                   }
                 ]
@@ -84,8 +173,8 @@ export function useWebSocket(url: string) {
             return {
               ...prev,
               messages: [...prev.messages, {
-                role: data.role,
-                text: data.text,
+                role: parsed.role,
+                text: parsed.text,
                 timestamp: new Date()
               }]
             }
@@ -95,67 +184,66 @@ export function useWebSocket(url: string) {
         case 'status':
           setState(prev => ({
             ...prev,
-            connectionState: data.state,
-            statusMessage: data.message
+            connectionState: parsed.state,
+            statusMessage: parsed.message
           }))
           break
 
         case 'recording':
           setState(prev => ({
             ...prev,
-            isRecording: data.isRecording
+            isRecording: parsed.isRecording
           }))
           break
           
         case 'speaking':
           setState(prev => ({
             ...prev,
-            isSpeaking: data.isSpeaking
+            isSpeaking: parsed.isSpeaking
           }))
-          console.log('🔊 JARVIS speaking:', data.isSpeaking)
+          console.log('🔊 JARVIS speaking:', parsed.isSpeaking)
           break
       }
     }
   }, [url])
 
   const disconnect = useCallback(() => {
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current)
-      reconnectTimeoutRef.current = null
-    }
+    manuallyClosedRef.current = true
+    clearReconnectTimer()
+    outgoingQueueRef.current = []
     if (wsRef.current) {
       wsRef.current.close()
       wsRef.current = null
     }
-  }, [])
+  }, [clearReconnectTimer])
 
   const send = useCallback((data: object) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(data))
-    }
-  }, [])
+    enqueueOrSend(JSON.stringify(data))
+  }, [enqueueOrSend])
 
   const toggleRecording = useCallback(() => {
     send({ type: 'toggle_recording' })
   }, [send])
 
   const sendAudioChunk = useCallback((audioData: Float32Array) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      const bytes = new Uint8Array(audioData.buffer)
-      const base64 = btoa(String.fromCharCode(...bytes))
-      
-      console.log('📤 Sending audio chunk, size:', audioData.length, 'base64 length:', base64.length)
-      
-      wsRef.current.send(JSON.stringify({
-        type: 'audio_chunk',
-        data: base64
-      }))
-    } else {
-      console.warn('⚠️ WebSocket not open, cannot send audio')
+    const bytes = new Uint8Array(audioData.buffer, audioData.byteOffset, audioData.byteLength)
+    let binary = ''
+    const chunkSize = 0x8000
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
     }
-  }, [])
+    const base64 = btoa(binary)
+
+    console.log('📤 Sending audio chunk, size:', audioData.length, 'base64 length:', base64.length)
+
+    enqueueOrSend(JSON.stringify({
+      type: 'audio_chunk',
+      data: base64
+    }))
+  }, [enqueueOrSend])
 
   useEffect(() => {
+    manuallyClosedRef.current = false
     connect()
     return () => {
       disconnect()

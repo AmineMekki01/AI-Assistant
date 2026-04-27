@@ -2,14 +2,16 @@
 WebSocket Bridge - Connects React Frontend to OpenAI Realtime API
 """
 
+import base64
 import asyncio
-import websockets
 import json
 import threading
+from typing import Any, Callable, Optional
+
 import numpy as np
-from typing import Optional, Callable
 from aiohttp import web
 import aiohttp_cors
+import websockets
 
 from ..api.routes import register_routes
 
@@ -102,6 +104,68 @@ class WebSocketBridge:
         except asyncio.CancelledError:
             pass
 
+    @staticmethod
+    def _decode_message(message: str) -> dict[str, Any]:
+        """Parse a client websocket payload safely."""
+        try:
+            data = json.loads(message)
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    async def _broadcast_json(self, payload: dict[str, Any]) -> None:
+        """Broadcast a JSON payload to all clients."""
+        await self.broadcast(payload)
+
+    def _set_recording_state(self, is_recording: bool) -> None:
+        self.is_recording = is_recording
+        if is_recording:
+            self.audio_buffer = []
+            if hasattr(self, '_chunk_count'):
+                self._chunk_count = 0
+
+    async def _handle_toggle_recording(self) -> None:
+        self._set_recording_state(not self.is_recording)
+
+        await self._broadcast_json({
+            "type": "recording",
+            "isRecording": self.is_recording,
+        })
+
+        if self.is_recording:
+            print("🎙️ Started recording from frontend")
+            if self._on_recording_start:
+                self._on_recording_start()
+            return
+
+        print("🛑 Stopped recording")
+        await self._process_recorded_audio()
+
+    async def _handle_audio_chunk(self, data: dict[str, Any]) -> None:
+        if not self.is_recording or not self.on_audio:
+            return
+
+        audio_data = data.get("data")
+        if not isinstance(audio_data, str) or not audio_data:
+            return
+
+        try:
+            audio_bytes = base64.b64decode(audio_data)
+        except Exception:
+            print("⚠️  Ignoring malformed audio chunk")
+            return
+
+        audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
+        pcm16_bytes = self._float_to_pcm16(audio_array)
+
+        if not hasattr(self, '_chunk_count'):
+            self._chunk_count = 0
+        self._chunk_count += 1
+        if self._chunk_count % 50 == 0:
+            print(f"📥 Bridge forwarded {self._chunk_count} chunks (recording={self.is_recording})")
+
+        self.on_audio(pcm16_bytes)
+
     async def _handle_client(self, websocket):
         """Handle a WebSocket client connection."""
         self.clients.add(websocket)
@@ -132,52 +196,25 @@ class WebSocketBridge:
     async def _handle_message(self, websocket, message: str):
         """Handle messages from frontend."""
         try:
-            data = json.loads(message)
+            data = self._decode_message(message)
+            if not data:
+                print("⚠️  Ignoring malformed websocket message")
+                return
+
             msg_type = data.get("type")
-            
+
             if msg_type == "toggle_recording":
-                self.is_recording = not self.is_recording
-                
-                await self.broadcast({
-                    "type": "recording",
-                    "isRecording": self.is_recording
-                })
-                
-                if self.is_recording:
-                    print("🎙️ Started recording from frontend")
-                    self.audio_buffer = []
-                    if self._on_recording_start:
-                        self._on_recording_start()
-                else:
-                    print("🛑 Stopped recording")
-                    await self._process_recorded_audio()
-                    
+                await self._handle_toggle_recording()
             elif msg_type == "audio_chunk":
-                if not self.is_recording:
-                    return
-                    
-                audio_data = data.get("data")
-                if audio_data and self.on_audio:
-                    import base64
-                    audio_bytes = base64.b64decode(audio_data)
-                    audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
-                    pcm16_bytes = self._float_to_pcm16(audio_array)
-                    
-                    if not hasattr(self, '_chunk_count'):
-                        self._chunk_count = 0
-                    self._chunk_count += 1
-                    if self._chunk_count % 50 == 0:
-                        print(f"📥 Bridge forwarded {self._chunk_count} chunks (recording={self.is_recording})")
-                    
-                    self.on_audio(pcm16_bytes)
-                    
+                await self._handle_audio_chunk(data)
+
         except Exception as e:
             print(f"Error handling message: {e}")
             
     async def _process_recorded_audio(self):
         """Commit audio buffer and create response."""
         print(f"🔔 _process_recorded_audio called, has _on_commit: {hasattr(self, '_on_commit')}")
-        if hasattr(self, '_on_commit') and self._on_commit:
+        if self._on_commit:
             print("🔔 Calling _on_commit callback...")
             self._on_commit()
         else:
@@ -195,6 +232,8 @@ class WebSocketBridge:
             await websocket.send(json.dumps(data))
         except websockets.exceptions.ConnectionClosed:
             pass
+        except Exception as e:
+            print(f"Error sending message to client: {e}")
             
     async def broadcast(self, data: dict):
         """Broadcast message to all connected clients."""
@@ -212,54 +251,40 @@ class WebSocketBridge:
                 
         for client in disconnected:
             self.clients.discard(client)
-            
-    def send_transcript(self, role: str, text: str):
-        """Send transcript to all frontend clients."""
+
+    def _broadcast_event(self, data: dict) -> None:
         if not self.loop:
             return
-            
-        asyncio.run_coroutine_threadsafe(
-            self.broadcast({
-                "type": "message",
-                "role": role,
-                "text": text
-            }),
-            self.loop
-        )
+
+        asyncio.run_coroutine_threadsafe(self.broadcast(data), self.loop)
+
+    def send_transcript(self, role: str, text: str):
+        """Send transcript to all frontend clients."""
+        self._broadcast_event({
+            "type": "message",
+            "role": role,
+            "text": text,
+        })
         
     def send_status(self, state: str, message: str):
         """Send status update to all frontend clients."""
-        if not self.loop:
-            return
-            
-        asyncio.run_coroutine_threadsafe(
-            self.broadcast({
-                "type": "status",
-                "state": state,
-                "message": message
-            }),
-            self.loop
-        )
+        self._broadcast_event({
+            "type": "status",
+            "state": state,
+            "message": message,
+        })
         
     def set_recording_state(self, is_recording: bool):
         """Update recording state."""
-        self.is_recording = is_recording
-        
+        self._set_recording_state(is_recording)
+
         if is_recording:
-            if hasattr(self, '_chunk_count'):
-                self._chunk_count = 0
             print("🎙️ Started recording - audio tracking reset")
-        
-        if not self.loop:
-            return
-            
-        asyncio.run_coroutine_threadsafe(
-            self.broadcast({
-                "type": "recording",
-                "isRecording": is_recording
-            }),
-            self.loop
-        )
+
+        self._broadcast_event({
+            "type": "recording",
+            "isRecording": is_recording,
+        })
         
     def set_speaking_state(self, is_speaking: bool):
         """Update speaking state - mutes mic input when JARVIS is talking."""
@@ -268,17 +293,11 @@ class WebSocketBridge:
             
         self.is_speaking = is_speaking
         print(f"🔊 JARVIS speaking: {is_speaking}")
-        
-        if not self.loop:
-            return
-            
-        asyncio.run_coroutine_threadsafe(
-            self.broadcast({
-                "type": "speaking",
-                "isSpeaking": is_speaking
-            }),
-            self.loop
-        )
+
+        self._broadcast_event({
+            "type": "speaking",
+            "isSpeaking": is_speaking,
+        })
 
 
 _bridge_instance: Optional[WebSocketBridge] = None

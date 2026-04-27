@@ -321,46 +321,72 @@ class RealtimeSession:
                 self._recv_queue.get_nowait()
             except Exception:
                 break
-        
+
         realtime_tools = self.tools
-        
-        if realtime_tools:
-            log.info("🔧 TOOLS_REGISTERED", count=len(realtime_tools), 
-                    names=[t.get("name", "EMPTY") for t in realtime_tools])
-            
-            for i, tool in enumerate(realtime_tools):
-                name = tool.get("name", "")
-                if not name:
-                    log.error(f"X EMPTY_TOOL_NAME at index {i}", tool=tool)
-        
-        from app.core.config import get_settings
-        app_settings = get_settings()
-        session_config = {
-            "type": "session.update",
-            "session": {
-                "modalities": ["audio", "text"],
-                "voice": app_settings.openai_realtime_voice,
-                "instructions": get_jarvis_persona(),
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "input_audio_transcription": {
-                    "model": "whisper-1",
-                    "language": "en"
-                },
-                "turn_detection": None,
-                "tool_choice": "auto",
-                "temperature": 0.7,
-            }
-        }
-        
-        if realtime_tools:
-            session_config["session"]["tools"] = realtime_tools
-        
-        await self.send_event(session_config)
+        self._log_tool_catalog(realtime_tools)
+
+        await self.send_event(self._build_session_config(realtime_tools))
         
         self.has_responded = False
         
         log.info("realtime.configured")
+
+    def _build_session_config(self, realtime_tools: list[dict[str, Any]]) -> dict[str, Any]:
+        """Build the session.update payload sent to the Realtime API."""
+        from app.core.config import get_settings
+
+        app_settings = get_settings()
+        session = {
+            "modalities": ["audio", "text"],
+            "voice": app_settings.openai_realtime_voice,
+            "instructions": get_jarvis_persona(),
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "input_audio_transcription": {
+                "model": "whisper-1",
+                "language": "en",
+            },
+            "turn_detection": None,
+            "tool_choice": "auto",
+            "temperature": 0.7,
+        }
+        if realtime_tools:
+            session["tools"] = realtime_tools
+        return {
+            "type": "session.update",
+            "session": session,
+        }
+
+    def _log_tool_catalog(self, realtime_tools: list[dict[str, Any]]) -> None:
+        """Validate the tool list before sending it to OpenAI."""
+        if not realtime_tools:
+            return
+
+        log.info(
+            "🔧 TOOLS_REGISTERED",
+            count=len(realtime_tools),
+            names=[t.get("name", "EMPTY") for t in realtime_tools],
+        )
+
+        for i, tool in enumerate(realtime_tools):
+            name = tool.get("name", "")
+            if not name:
+                log.error(f"X EMPTY_TOOL_NAME at index {i}", tool=tool)
+
+    @staticmethod
+    def _parse_tool_arguments(arguments: str) -> dict[str, Any]:
+        """Safely decode the model-provided tool arguments."""
+        try:
+            return json.loads(arguments) if arguments else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @staticmethod
+    def _stringify_tool_output(output_data: Any) -> str:
+        """Convert a registry result into the string payload OpenAI expects."""
+        if isinstance(output_data, (dict, list)):
+            return json.dumps(output_data, ensure_ascii=False, default=str)
+        return str(output_data)
     
     async def _pump(self) -> None:
         """Pump messages from WebSocket to queue."""
@@ -494,11 +520,9 @@ class RealtimeSession:
         log.info("🔧 TOOL_CALL_START", name=name, call_id=call_id)
         log.info("📥 TOOL_CALL_ARGS", name=name, args=arguments)
 
-        try:
-            args = json.loads(arguments) if arguments else {}
-        except json.JSONDecodeError:
+        args = self._parse_tool_arguments(arguments)
+        if arguments and not args:
             log.error("X TOOL_CALL_PARSE_ERROR", name=name, raw_arguments=arguments)
-            args = {}
 
         dispatch_start = asyncio.get_event_loop().time()
         result = await REGISTRY.call(name, args)
@@ -511,12 +535,7 @@ class RealtimeSession:
         )
 
         if result.get("ok"):
-            output_data = result.get("result")
-            output = (
-                json.dumps(output_data)
-                if isinstance(output_data, (dict, list))
-                else str(output_data)
-            )
+            output = self._stringify_tool_output(result.get("result"))
             log.info("✅ TOOL_CALL_SUCCESS", name=name, output_preview=output[:300])
         else:
             error_msg = result.get("error", "Unknown error")
