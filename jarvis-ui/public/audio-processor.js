@@ -3,6 +3,18 @@ class JarvisAudioProcessor extends AudioWorkletProcessor {
     super()
     this._buffer = []
     this._frameSize = 4096
+
+    this.port.onmessage = (event) => {
+      const data = event.data
+      if (!data || typeof data !== 'object') {
+        return
+      }
+
+      if (data.type === 'flush') {
+        this._flush()
+        this.port.postMessage({ type: 'flushed' })
+      }
+    }
   }
 
   _flush() {

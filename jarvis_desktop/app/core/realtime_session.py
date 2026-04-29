@@ -133,6 +133,66 @@ def _fetch_memory_primer(limit: int = 8) -> str:
         return ""
 
 
+def _response_style_block() -> str:
+    return """── Response style ────────────────────────────────────────────────
+  • Answer the user's question first.
+  • Avoid reintroducing yourself or repeating "Certainly, sir" unless the user has
+    just made a request that needs a brief acknowledgment.
+  • Prefer plain, natural English over ornate or overly ceremonial wording.
+  • If the answer is simple, keep it simple. Do not pad with extra reassurance.
+  • If the user asks for a greeting or says something like "say hi", answer with
+    one short greeting sentence only. Do not add a follow-up question unless the user
+    explicitly asks for conversation.
+  • If the user asks "how are you" / "how are you doing" / similar status checks,
+    answer with a brief status only and do not start with "good morning/afternoon/evening".
+    Do not add a follow-up question.
+"""
+
+
+def _current_context_block(date_str: str, time_str: str, tz_str: str, location: str) -> str:
+    return f"""── Current context ──────────────────────────────────────────────
+  • Date: {date_str}
+  • Time: {time_str} ({tz_str})
+  • Location: {location or 'unknown'}
+"""
+
+
+def _connected_services_block(integrations: dict[str, Any], apple_calendars: list[str]) -> str:
+    int_lines = [
+        f"  • Gmail / Google Calendar: {'connected' if integrations['google'] else 'NOT connected'}",
+        f"  • Zimbra / OVH mail: {'connected' if integrations['zimbra'] else 'not configured'}",
+        f"  • Apple Calendar: {'enabled' if integrations['apple_calendar'] else 'disabled'}"
+        + (f" (calendars: {', '.join(apple_calendars[:8])})" if apple_calendars else ""),
+        f"  • Obsidian vault: {integrations['obsidian_notes']} note(s) indexed"
+        if integrations['obsidian_notes'] else "  • Obsidian vault: not synced",
+    ]
+
+    return f"""── Connected services ───────────────────────────────────────────
+{chr(10).join(int_lines)}
+"""
+
+
+def _memory_block(memory_primer: str) -> str:
+    mem_block = memory_primer.strip() if memory_primer and memory_primer.strip() else "(none yet)"
+    return f"""── What you already know about the user ─────────────────────────
+{mem_block}
+"""
+
+
+def _transcription_prompt(user_name: str) -> str:
+    cleaned_name = user_name.strip()
+    if not cleaned_name or cleaned_name.lower() == "sir":
+        return ""
+
+    return (
+        "Transcribe the user's speech verbatim. "
+        "Preserve names and proper nouns exactly as spoken. "
+        "Preserve the wake word 'Jarvis' exactly if it is spoken. "
+        f"Preserve the user's name '{cleaned_name}' exactly if it is spoken. "
+        "Do not substitute similar names when audio is unclear."
+    )
+
+
 def get_jarvis_persona() -> str:
     """Generate the JARVIS system prompt with live context injected at session start."""
     from datetime import datetime
@@ -154,34 +214,21 @@ def get_jarvis_persona() -> str:
     apple_calendars = _fetch_apple_calendars() if integrations["apple_calendar"] else []
     memory_primer = _fetch_memory_primer(8)
 
-    int_lines = [
-        f"  • Gmail / Google Calendar: {'connected' if integrations['google'] else 'NOT connected'}",
-        f"  • Zimbra / OVH mail: {'connected' if integrations['zimbra'] else 'not configured'}",
-        f"  • Apple Calendar: {'enabled' if integrations['apple_calendar'] else 'disabled'}"
-        + (f" (calendars: {', '.join(apple_calendars[:8])})" if apple_calendars else ""),
-        f"  • Obsidian vault: {integrations['obsidian_notes']} note(s) indexed"
-        if integrations['obsidian_notes'] else "  • Obsidian vault: not synced",
-    ]
-
-    mem_block = memory_primer.strip() if memory_primer and memory_primer.strip() else "(none yet)"
-
     persona = f"""You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), the refined
 British AI butler modelled on Tony Stark's personal assistant. You address the user as
 "{user_name}" or "sir". Speak with a calm, composed, sophisticated British tone - polite,
-articulate, and subtly dry-witted. Use slightly formal phrasing like "Certainly, sir",
-"Right away, sir", "As you wish", "Very good, sir". Never use casual filler words.
-Keep spoken replies brief (1-3 sentences) unless the user asks for detail.
+articulate, and subtly dry-witted. Use slightly formal phrasing sparingly; do not
+repeat the same opener in every reply. Never use casual filler words.
+Keep spoken replies brief and direct (usually 1-2 sentences) unless the user asks
+for detail.
 
-── Current context ──────────────────────────────────────────────
-  • Date: {date_str}
-  • Time: {time_str} ({tz_str})
-  • Location: {location or 'unknown'}
+{_response_style_block()}
 
-── Connected services ───────────────────────────────────────────
-{chr(10).join(int_lines)}
+{_current_context_block(date_str, time_str, tz_str, location)}
 
-── What you already know about the user ─────────────────────────
-{mem_block}
+{_connected_services_block(integrations, apple_calendars)}
+
+{_memory_block(memory_primer)}
 
 ── Tool-argument faithfulness (CRITICAL) ────────────────────────
   • Pass the user's words into tool arguments VERBATIM. Never silently correct,
@@ -253,22 +300,41 @@ class RealtimeSession:
                  on_audio: Optional[Callable[[bytes], None]] = None):
         self.api_key = os.getenv("OPENAI_API_KEY", "")
         self.ws: Optional[ClientConnection] = None
-        self._recv_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=512)
         self._pump_task: Optional[asyncio.Task] = None
-        self._closed = asyncio.Event()
-        self.response_buffer = ""
         self.on_transcript = on_transcript
         self.on_audio = on_audio
         load_all_capabilities()
         self.tools = REGISTRY.as_openai_tool_list()
         self._reconnect_lock: Optional[asyncio.Lock] = None
         self._intentional_close = False
+        self._tool_tasks: set[asyncio.Task] = set()
+        self._reset_runtime_state()
+
+    def _reset_runtime_state(self) -> None:
+        self._recv_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=512)
+        self._closed = asyncio.Event()
+        self.response_buffer = ""
         self.has_responded = False
         self._response_active = False
         self._last_response_create_at: float = 0.0
-        self._tool_tasks: set[asyncio.Task] = set()
         self._push_to_queue = True
         self._commit_ack_event: Optional[asyncio.Event] = None
+
+    def reset_turn(self) -> None:
+        """Reset the assistant turn state without touching the socket."""
+        self.has_responded = False
+        self.response_buffer = ""
+
+    async def interrupt_active_response(self) -> None:
+        """Cancel any in-progress assistant response when the user starts speaking."""
+        self.reset_turn()
+
+        if not self._response_active:
+            return
+
+        log.info("realtime.response_interrupted")
+        await self.send_event({"type": "response.cancel"})
+        self._response_active = False
         
     async def connect(self) -> None:
         """Connect to OpenAI Realtime API."""
@@ -291,14 +357,7 @@ class RealtimeSession:
         )
         
         log.info("realtime.connected")
-        self._closed = asyncio.Event()
-        self._recv_queue = asyncio.Queue(maxsize=512)
-        self.response_buffer = ""
-        self.has_responded = False
-        self._response_active = False
-        self._last_response_create_at = 0.0
-        self._intentional_close = False
-        self._push_to_queue = True
+        self._reset_runtime_state()
         self._commit_ack_event = asyncio.Event()
         self._pump_task = asyncio.create_task(self._pump(), name="realtime-pump")
     
@@ -336,19 +395,27 @@ class RealtimeSession:
         from app.core.config import get_settings
 
         app_settings = get_settings()
+        personal = app_settings.personal_info
+        user_name = personal.get("name") or ""
+        transcription_prompt = _transcription_prompt(user_name)
+
+        input_audio_transcription: dict[str, Any] = {
+            "model": "whisper-1",
+            "language": "en",
+        }
+        if transcription_prompt:
+            input_audio_transcription["prompt"] = transcription_prompt
+
         session = {
             "modalities": ["audio", "text"],
             "voice": app_settings.openai_realtime_voice,
             "instructions": get_jarvis_persona(),
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
-            "input_audio_transcription": {
-                "model": "whisper-1",
-                "language": "en",
-            },
+            "input_audio_transcription": input_audio_transcription,
             "turn_detection": None,
             "tool_choice": "auto",
-            "temperature": 0.7,
+            "temperature": 0.6,
         }
         if realtime_tools:
             session["tools"] = realtime_tools
@@ -387,6 +454,147 @@ class RealtimeSession:
         if isinstance(output_data, (dict, list)):
             return json.dumps(output_data, ensure_ascii=False, default=str)
         return str(output_data)
+
+    def _handle_binary_pump_message(self, msg: bytes) -> None:
+        if not self.on_audio:
+            return
+
+        try:
+            self.on_audio(msg)
+        except Exception as e:
+            log.error("audio_callback_error", error=str(e))
+
+    async def _handle_text_pump_message(self, msg: str) -> None:
+        try:
+            data = json.loads(msg)
+        except json.JSONDecodeError:
+            log.warning("non_json_message", preview=msg[:120])
+            return
+
+        await self._handle_pump_event(data)
+
+    def _handle_response_event(self, evt_type: str, data: dict[str, Any]) -> None:
+        if evt_type == "response.created":
+            self._response_active = True
+            rid = (data.get("response") or {}).get("id", "?")
+            log.info(f"🎬 response.created | id={rid}")
+            return
+
+        if evt_type == "response.cancelled":
+            self._response_active = False
+            log.info("response.cancelled")
+            return
+
+        if evt_type == "response.audio.delta":
+            audio_delta = data.get("delta", "")
+            if audio_delta and self.on_audio:
+                try:
+                    audio_bytes = base64.b64decode(audio_delta)
+                    self.on_audio(audio_bytes)
+                except Exception as e:
+                    log.error("audio_delta_callback_error", error=str(e))
+            return
+
+        if evt_type == "response.audio.done":
+            log.info("response.audio.done")
+            self.has_responded = True
+            return
+
+        if evt_type == "response.done":
+            log.info("response.done")
+            self.has_responded = True
+            self._response_active = False
+
+            resp = data.get("response") or {}
+            status = resp.get("status")
+            if status and status != "completed":
+                log.error(
+                    "🚨 response.done non-completed",
+                    status=status,
+                    status_details=resp.get("status_details"),
+                )
+
+    def _handle_commit_event(self, evt_type: str, data: dict[str, Any]) -> None:
+        if evt_type == "input_audio_buffer.committed":
+            item_id = data.get("item_id", "?")
+            log.info(f"📝 input_audio_buffer.committed | item_id={item_id}")
+            if self._commit_ack_event is not None:
+                self._commit_ack_event.set()
+            return
+
+        if evt_type == "input_audio_buffer.speech_started":
+            log.info("input_audio_buffer.speech_started")
+            return
+
+        if evt_type == "input_audio_buffer.speech_stopped":
+            log.info("input_audio_buffer.speech_stopped")
+
+    def _handle_item_event(self, evt_type: str, data: dict[str, Any]) -> None:
+        if evt_type != "conversation.item.created":
+            return
+
+        item = data.get("item") or {}
+        log.info(
+            f"conversation.item.created | type={item.get('type','?')} "
+            f"role={item.get('role','?')}"
+        )
+
+    def _handle_transcript_event(self, evt_type: str, data: dict[str, Any]) -> None:
+        if evt_type == "conversation.item.input_audio_transcription.completed":
+            transcript = data.get("transcript", "")
+            if transcript:
+                log.info("🎤 USER_SAID", text=transcript)
+                if self.on_transcript:
+                    self.on_transcript("user", transcript)
+                if os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true":
+                    asyncio.create_task(self._extract_and_maybe_store_memory(transcript))
+            return
+
+        if evt_type == "response.audio_transcript.delta":
+            delta = data.get("delta", "")
+            self.response_buffer += delta
+            if self.on_transcript:
+                self.on_transcript("assistant", self.response_buffer)
+            return
+
+        if evt_type == "response.audio_transcript.done":
+            if self.response_buffer:
+                log.info("🤖 JARVIS_SAID", text=self.response_buffer[:200])
+            self.response_buffer = ""
+
+    async def _handle_tool_call_event(self, evt_type: str, data: dict[str, Any]) -> None:
+        if evt_type != "response.function_call_arguments.done":
+            return
+
+        task = asyncio.create_task(self._handle_tool_call(data))
+        self._tool_tasks.add(task)
+        task.add_done_callback(self._tool_tasks.discard)
+
+    def _queue_pump_event(self, data: dict[str, Any]) -> None:
+        if not self._push_to_queue:
+            return
+
+        try:
+            self._recv_queue.put_nowait(data)
+        except asyncio.QueueFull:
+            try:
+                self._recv_queue.get_nowait()
+                self._recv_queue.put_nowait(data)
+            except Exception:
+                pass
+
+    async def _handle_pump_event(self, data: dict[str, Any]) -> None:
+        evt_type = data.get("type", "")
+
+        if evt_type == "error":
+            log.error("realtime.error", error=data)
+
+        self._handle_response_event(evt_type, data)
+        self._handle_commit_event(evt_type, data)
+        self._handle_item_event(evt_type, data)
+        self._handle_transcript_event(evt_type, data)
+        await self._handle_tool_call_event(evt_type, data)
+        self._queue_pump_event(data)
     
     async def _pump(self) -> None:
         """Pump messages from WebSocket to queue."""
@@ -395,114 +603,10 @@ class RealtimeSession:
         try:
             async for msg in self.ws:
                 if isinstance(msg, bytes):
-                    if self.on_audio:
-                        try:
-                            self.on_audio(msg)
-                        except Exception as e:
-                            log.error("audio_callback_error", error=str(e))
+                    self._handle_binary_pump_message(msg)
                     continue
-                
-                try:
-                    data = json.loads(msg)
-                except json.JSONDecodeError:
-                    log.warning("non_json_message", preview=msg[:120])
-                    continue
-                
-                evt_type = data.get("type", "")
 
-                if evt_type == "error":
-                    log.error("realtime.error", error=data)
-
-                if evt_type == "response.created":
-                    self._response_active = True
-                    rid = (data.get("response") or {}).get("id", "?")
-                    log.info(f"🎬 response.created | id={rid}")
-
-                if evt_type == "response.cancelled":
-                    self._response_active = False
-                    log.info("response.cancelled")
-
-                if evt_type == "input_audio_buffer.committed":
-                    item_id = data.get("item_id", "?")
-                    log.info(f"📝 input_audio_buffer.committed | item_id={item_id}")
-                    if self._commit_ack_event is not None:
-                        self._commit_ack_event.set()
-
-                if evt_type == "input_audio_buffer.speech_started":
-                    log.info("input_audio_buffer.speech_started")
-
-                if evt_type == "input_audio_buffer.speech_stopped":
-                    log.info("input_audio_buffer.speech_stopped")
-
-                if evt_type == "conversation.item.created":
-                    item = data.get("item") or {}
-                    log.info(
-                        f"conversation.item.created | type={item.get('type','?')} "
-                        f"role={item.get('role','?')}"
-                    )
-
-                if evt_type == "response.audio.delta":
-                    audio_delta = data.get("delta", "")
-                    if audio_delta and self.on_audio:
-                        try:
-                            import base64
-                            audio_bytes = base64.b64decode(audio_delta)
-                            self.on_audio(audio_bytes)
-                        except Exception as e:
-                            log.error("audio_delta_callback_error", error=str(e))
-                
-                if evt_type == "response.audio.done":
-                    log.info("response.audio.done")
-                    self.has_responded = True
-
-                if evt_type == "response.done":
-                    log.info("response.done")
-                    self.has_responded = True
-                    self._response_active = False
-
-                    resp = data.get("response") or {}
-                    status = resp.get("status")
-                    if status and status != "completed":
-                        log.error(
-                            "🚨 response.done non-completed",
-                            status=status,
-                            status_details=resp.get("status_details"),
-                        )
-
-                if evt_type == "conversation.item.input_audio_transcription.completed":
-                    transcript = data.get("transcript", "")
-                    if transcript:
-                        log.info("🎤 USER_SAID", text=transcript)
-                        if self.on_transcript:
-                            self.on_transcript("user", transcript)
-                        if os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true":
-                            asyncio.create_task(self._extract_and_maybe_store_memory(transcript))
-
-                if evt_type == "response.audio_transcript.delta":
-                    delta = data.get("delta", "")
-                    self.response_buffer += delta
-                    if self.on_transcript:
-                        self.on_transcript("assistant", self.response_buffer)
-
-                if evt_type == "response.audio_transcript.done":
-                    if self.response_buffer:
-                        log.info("🤖 JARVIS_SAID", text=self.response_buffer[:200])
-                    self.response_buffer = ""
-
-                if evt_type == "response.function_call_arguments.done":
-                    task = asyncio.create_task(self._handle_tool_call(data))
-                    self._tool_tasks.add(task)
-                    task.add_done_callback(self._tool_tasks.discard)
-
-                if self._push_to_queue:
-                    try:
-                        self._recv_queue.put_nowait(data)
-                    except asyncio.QueueFull:
-                        try:
-                            self._recv_queue.get_nowait()
-                            self._recv_queue.put_nowait(data)
-                        except Exception:
-                            pass
+                await self._handle_text_pump_message(msg)
                 
         except websockets.exceptions.ConnectionClosed:
             log.info("realtime.connection_closed")
@@ -751,17 +855,6 @@ class RealtimeSession:
                     return
                 continue
             yield evt
-    
-    def reset_turn(self) -> None:
-        """Reset the response state for a new conversation turn."""
-        self.has_responded = False
-        self.response_buffer = ""
-    
-    async def close(self) -> None:
-        """Close the connection."""
-        self._intentional_close = True
-        self._closed.set()
-        if self._pump_task:
             self._pump_task.cancel()
             try:
                 await self._pump_task
