@@ -17,6 +17,7 @@ export function useAudio(onAudioData?: (data: Float32Array) => void) {
   const streamRef = useRef<MediaStream | null>(null)
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
   const processorRef = useRef<AudioNode | null>(null)
+  const workletRef = useRef<AudioWorkletNode | null>(null)
   const workletGainRef = useRef<GainNode | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
   const rafRef = useRef<number | null>(null)
@@ -81,6 +82,7 @@ export function useAudio(onAudioData?: (data: Float32Array) => void) {
           silentGain.connect(audioContext.destination)
 
           captureNode = workletNode
+          workletRef.current = workletNode
           workletGainRef.current = silentGain
         } catch (workletError) {
           console.warn('AudioWorklet unavailable, falling back to ScriptProcessorNode', workletError)
@@ -116,12 +118,22 @@ export function useAudio(onAudioData?: (data: Float32Array) => void) {
     }
 
     if (processorRef.current) {
+      if (workletRef.current) {
+        try {
+          workletRef.current.port.postMessage({ type: 'flush' })
+        } catch (error) {
+          console.warn('Failed to flush AudioWorklet buffer before stop', error)
+        }
+      }
+
       processorRef.current.disconnect()
       if (processorRef.current instanceof ScriptProcessorNode) {
         processorRef.current.onaudioprocess = null
       }
       processorRef.current = null
     }
+
+    workletRef.current = null
 
     if (workletGainRef.current) {
       workletGainRef.current.disconnect()

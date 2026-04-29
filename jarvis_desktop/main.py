@@ -227,12 +227,32 @@ class JarvisWebSocketApp:
             
             self._total_audio_sent = 0
             self._audio_chunk_count = 0
+
+    def _clear_audio_queue(self):
+        """Drop any queued assistant audio when the user interrupts."""
+        cleared = 0
+        while True:
+            try:
+                self.audio_queue.get_nowait()
+                cleared += 1
+            except queue.Empty:
+                break
+
+        if cleared:
+            print(f"🧹 Cleared {cleared} queued audio chunk(s)")
     
     def _on_recording_start(self):
         """Reset state when recording starts."""
         print("🔄 Recording started - resetting response state")
         if self.session:
-            self.session.reset_turn()
+            future = asyncio.run_coroutine_threadsafe(
+                self.session.interrupt_active_response(),
+                self.event_loop,
+            )
+            try:
+                future.result(timeout=0.5)
+            except Exception as e:
+                print(f"⚠️  Error interrupting active response: {e}")
 
         if self.bridge:
             if self._speaking_timer:
@@ -240,6 +260,8 @@ class JarvisWebSocketApp:
                 self._speaking_timer = None
             self.bridge.set_speaking_state(False)
             print("🔊 Speaking state cleared - ready for input")
+
+        self._clear_audio_queue()
         
     def _audio_player_thread(self):
         """Play audio from queue with buffering for smooth playback."""
