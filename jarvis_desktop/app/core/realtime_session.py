@@ -276,6 +276,10 @@ for detail.
       consulting multiple sources (notes + web, memory + web, etc.). Example
       triggers: "what's the weather where my sister lives", "remind me what
       I wrote about the Taipei trip and find related articles".
+    - `delegate_to_briefing` - daily briefing and catch-up requests that need
+      a short spoken summary across calendar, mail, reminders, and notes.
+      Example triggers: "give me my daily briefing", "what's my day", "catch
+      me up this morning".
     - `delegate_to_workspace` - multi-step triage across mail/calendar/notes.
       Example triggers: "what do I have this week and what should I prep",
       "summarise unread emails that need action", "anything conflicting with

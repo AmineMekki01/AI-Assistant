@@ -1,18 +1,32 @@
 """Google OAuth handlers."""
 import os
-from pathlib import Path
+
 from aiohttp import web
+
+try:
+    from google.oauth2.credentials import Credentials
+    _GOOGLE_AVAILABLE = True
+except ImportError:
+    Credentials = None
+    _GOOGLE_AVAILABLE = False
+
+from ...services.google_auth import load_google_credentials, token_path
 
 
 async def handle_google_status(request):
     """Check if Google OAuth tokens exist."""
-    token_path = Path.home() / ".jarvis" / "google_token.json"
-    connected = os.path.exists(token_path)
+    token_file = token_path()
+    connected = False
 
     last_connected = None
-    if connected:
-        stat = os.stat(token_path)
-        last_connected = stat.st_mtime
+    if token_file.exists():
+        try:
+            load_google_credentials(token_file, repair=False)
+            connected = True
+            stat = os.stat(token_file)
+            last_connected = stat.st_mtime
+        except Exception as e:
+            print(f"⚠️  [BACKEND] Google token file invalid: {e}")
 
     print(f"🔐 [BACKEND] Google status check: connected={connected}")
 
@@ -38,7 +52,6 @@ async def handle_oauth_callback(request):
     print(f"🔐 [BACKEND] Exchanging code for tokens...")
 
     import aiohttp
-    import json
 
     token_url = "https://oauth2.googleapis.com/token"
     token_data = {
@@ -58,12 +71,22 @@ async def handle_oauth_callback(request):
 
             tokens = await response.json()
 
-    jarvis_dir = Path.home() / ".jarvis"
-    jarvis_dir.mkdir(exist_ok=True)
+    if not _GOOGLE_AVAILABLE:
+        return web.json_response({"error": "Google client libraries are not installed"}, status=500)
 
-    token_path = jarvis_dir / "google_token.json"
-    with open(token_path, 'w') as f:
-        json.dump(tokens, f)
+    scopes = [scope for scope in (tokens.get("scope") or "").split() if scope]
+    creds = Credentials(
+        token=tokens.get("access_token"),
+        refresh_token=tokens.get("refresh_token"),
+        token_uri=token_url,
+        client_id=settings.google_client_id,
+        client_secret=settings.google_client_secret,
+        scopes=scopes or None,
+    )
+
+    token_file = token_path()
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.write_text(creds.to_json())
 
     print(f"🔐 [BACKEND] Google OAuth tokens saved successfully")
 

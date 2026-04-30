@@ -8,17 +8,15 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 try:
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
     _GOOGLE_AVAILABLE = True
 except ImportError:
     _GOOGLE_AVAILABLE = False
-    Credentials = None
-    Request = None
     build = None
     HttpError = Exception
+
+from .google_auth import load_google_credentials
 
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
@@ -67,7 +65,12 @@ def _build_service_sync():
             "Google and click 'Connect Google Account'."
         )
 
-    creds = Credentials.from_authorized_user_file(token_path)
+    try:
+        creds, repaired = load_google_credentials(token_path, repair=True)
+        if repaired:
+            print("🔧 Repaired Google credentials file for Calendar")
+    except Exception as e:
+        return None, f"Invalid Google credentials. Please reconnect the account in Settings. ({e})"
 
     granted = set(creds.scopes or [])
     calendar_scopes = {
@@ -85,6 +88,8 @@ def _build_service_sync():
     if not creds.valid:
         if creds.expired and creds.refresh_token:
             try:
+                from google.auth.transport.requests import Request
+
                 creds.refresh(Request())
                 os.makedirs(os.path.dirname(token_path), exist_ok=True)
                 with open(token_path, "w") as f:
