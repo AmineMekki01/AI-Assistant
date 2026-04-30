@@ -10,15 +10,13 @@ from email.mime.text import MIMEText
 from typing import List, Optional
 
 try:
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request
     from googleapiclient.discovery import build
     _GOOGLE_AVAILABLE = True
 except ImportError:
     _GOOGLE_AVAILABLE = False
-    Credentials = None
-    Request = None
     build = None
+
+from .google_auth import load_google_credentials
 
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
@@ -42,11 +40,18 @@ def _build_service_sync():
     if not os.path.exists(token_path):
         return None, "Gmail is not connected. Open Settings -> Integrations -> Google."
 
-    creds = Credentials.from_authorized_user_file(token_path)
+    try:
+        creds, repaired = load_google_credentials(token_path, repair=True)
+        if repaired:
+            print("🔧 Repaired Google credentials file for Gmail")
+    except Exception as e:
+        return None, f"Invalid Google credentials. Please reconnect in Settings. ({e})"
 
     if not creds.valid:
         if creds.expired and creds.refresh_token:
             try:
+                from google.auth.transport.requests import Request
+
                 creds.refresh(Request())
                 os.makedirs(os.path.dirname(token_path), exist_ok=True)
                 with open(token_path, "w") as f:
