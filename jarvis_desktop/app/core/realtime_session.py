@@ -6,8 +6,12 @@ import asyncio
 import base64
 import json
 import os
+import shutil
+import sys
+import tempfile
 from typing import Any, AsyncIterator, Callable, Optional
 
+import httpx
 import websockets
 from websockets.asyncio.client import ClientConnection
 
@@ -140,6 +144,12 @@ def _response_style_block() -> str:
     just made a request that needs a brief acknowledgment.
   • Prefer plain, natural English over ornate or overly ceremonial wording.
   • If the answer is simple, keep it simple. Do not pad with extra reassurance.
+  • This brevity rule does NOT apply to delegated briefings or other
+    explicitly requested multi-part summaries. In those cases, speak the full
+    answer clearly and do not compress it into a one-line recap.
+  • For delegated briefings, the briefing result is already the final answer.
+    Speak it back as-is, in full, without adding a wrapper like "That’s your
+    daily briefing", without summarising it, and without appending a question.
   • If the user asks for a greeting or says something like "say hi", answer with
     one short greeting sentence only. Do not add a follow-up question unless the user
     explicitly asks for conversation.
@@ -276,10 +286,16 @@ for detail.
       consulting multiple sources (notes + web, memory + web, etc.). Example
       triggers: "what's the weather where my sister lives", "remind me what
       I wrote about the Taipei trip and find related articles".
-    - `delegate_to_briefing` - daily briefing and catch-up requests that need
-      a short spoken summary across calendar, mail, reminders, and notes.
-      Example triggers: "give me my daily briefing", "what's my day", "catch
-      me up this morning".
+    - `delegate_to_briefing` - ALWAYS use this for daily briefing and catch-up
+      requests that need a structured spoken briefing across calendar, mail,
+      reminders, and notes. Example triggers: "give me my daily briefing",
+      "what's my day", "catch me up this morning".
+      Before calling it, first say one short acknowledgement out loud such as
+      "Hang on — I’m looking into your calendar and mail now." Then call the
+      tool. When the briefing comes back, speak the result directly and in full.
+      Do not replace it with "That’s your daily briefing" or any shorter
+      paraphrase, and do not add a follow-up question unless the briefing itself
+      explicitly requires one.
     - `delegate_to_workspace` - multi-step triage across mail/calendar/notes.
       Example triggers: "what do I have this week and what should I prep",
       "summarise unread emails that need action", "anything conflicting with
@@ -301,12 +317,16 @@ class RealtimeSession:
     """Direct WebSocket connection to OpenAI Realtime API."""
     
     def __init__(self, on_transcript: Optional[Callable[[str, str], None]] = None,
-                 on_audio: Optional[Callable[[bytes], None]] = None):
+                 on_audio: Optional[Callable[[bytes], None]] = None,
+                 on_status: Optional[Callable[[str, str], None]] = None,
+                 on_speaking: Optional[Callable[[bool], None]] = None):
         self.api_key = os.getenv("OPENAI_API_KEY", "")
         self.ws: Optional[ClientConnection] = None
         self._pump_task: Optional[asyncio.Task] = None
         self.on_transcript = on_transcript
         self.on_audio = on_audio
+        self.on_status = on_status
+        self.on_speaking = on_speaking
         load_all_capabilities()
         self.tools = REGISTRY.as_openai_tool_list()
         self._reconnect_lock: Optional[asyncio.Lock] = None
@@ -458,6 +478,82 @@ class RealtimeSession:
         if isinstance(output_data, (dict, list)):
             return json.dumps(output_data, ensure_ascii=False, default=str)
         return str(output_data)
+
+    async def _speak_direct_text(self, text: str) -> None:
+        """Speak text directly so briefing output is not paraphrased.
+
+        Prefer OpenAI text-to-speech with the same configured JARVIS voice so
+        the briefing sounds consistent with the rest of the assistant.
+        """
+        if self.on_transcript:
+            self.on_transcript("assistant", text)
+
+        if self.on_speaking:
+            try:
+                self.on_speaking(True)
+            except Exception as e:
+                log.debug("direct_speech.speaking_start_failed", error=str(e))
+
+        try:
+            from .config import get_settings
+
+            app_settings = get_settings()
+            if sys.platform == "darwin" and app_settings.openai_api_key:
+                tts_url = "https://api.openai.com/v1/audio/speech"
+                payload = {
+                    "model": "tts-1",
+                    "voice": app_settings.openai_realtime_voice,
+                    "input": text,
+                    "response_format": "mp3",
+                }
+
+                async with httpx.AsyncClient(timeout=90.0) as client:
+                    response = await client.post(
+                        tts_url,
+                        headers={
+                            "Authorization": f"Bearer {app_settings.openai_api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                    )
+                    response.raise_for_status()
+
+                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+                    tmp.write(response.content)
+                    audio_path = tmp.name
+
+                try:
+                    if shutil.which("afplay"):
+                        process = await asyncio.create_subprocess_exec(
+                            "afplay",
+                            audio_path,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        await process.wait()
+                    else:
+                        log.warning("direct_speech.player_missing", player="afplay")
+                finally:
+                    try:
+                        os.unlink(audio_path)
+                    except Exception:
+                        pass
+            elif sys.platform == "darwin" and shutil.which("say"):
+                process = await asyncio.create_subprocess_exec(
+                    "say",
+                    text,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await process.wait()
+            else:
+                log.warning("direct_speech.unavailable", platform=sys.platform)
+        finally:
+            if self.on_speaking:
+                try:
+                    self.on_speaking(False)
+                except Exception as e:
+                    log.debug("direct_speech.speaking_end_failed", error=str(e))
 
     def _handle_binary_pump_message(self, msg: bytes) -> None:
         if not self.on_audio:
@@ -633,8 +729,27 @@ class RealtimeSession:
             log.error("X TOOL_CALL_PARSE_ERROR", name=name, raw_arguments=arguments)
 
         dispatch_start = asyncio.get_event_loop().time()
-        result = await REGISTRY.call(name, args)
-        dispatch_time = asyncio.get_event_loop().time() - dispatch_start
+        briefing_status_sent = False
+        if name == "delegate_to_briefing" and self.on_status:
+            try:
+                self.on_status(
+                    "connected",
+                    "Hang on please while i look into that for you...",
+                )
+                briefing_status_sent = True
+            except Exception as e:
+                log.debug("status.emit_failed", name=name, error=str(e))
+
+        result: dict[str, Any] = {"ok": False, "error": "Unknown error"}
+        try:
+            result = await REGISTRY.call(name, args)
+        finally:
+            dispatch_time = asyncio.get_event_loop().time() - dispatch_start
+            if briefing_status_sent and self.on_status:
+                try:
+                    self.on_status("connected", "J.A.R.V.I.S. SYSTEM ONLINE")
+                except Exception as e:
+                    log.debug("status.restore_failed", name=name, error=str(e))
 
         log.info(
             "⏱️ TOOL_CALL_DURATION",
@@ -649,7 +764,12 @@ class RealtimeSession:
             error_msg = result.get("error", "Unknown error")
             output = f"Error: {error_msg}"
             log.error("X TOOL_CALL_FAILED", name=name, error=error_msg)
-        
+
+        if name == "delegate_to_briefing" and result.get("ok") and sys.platform == "darwin" and shutil.which("say"):
+            await self._speak_direct_text(output)
+            log.info("tool_result", name=name, result=output[:200])
+            return
+
         await self.send_event({
             "type": "conversation.item.create",
             "item": {
@@ -658,9 +778,9 @@ class RealtimeSession:
                 "output": output,
             }
         })
-        
+
         await self.send_event({"type": "response.create"})
-        
+
         log.info("tool_result", name=name, result=output[:200])
 
     async def _extract_and_maybe_store_memory(self, transcript: str) -> None:
@@ -866,4 +986,30 @@ class RealtimeSession:
                 pass
         if self.ws:
             await self.ws.close()
+        log.info("realtime.closed")
+
+    async def close(self) -> None:
+        """Close the realtime session gracefully."""
+        self._intentional_close = True
+        self._closed.set()
+
+        if self._pump_task and not self._pump_task.done():
+            self._pump_task.cancel()
+            try:
+                await self._pump_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.debug("realtime.close.pump_error", error=str(e))
+
+        self._pump_task = None
+
+        if self.ws:
+            try:
+                await self.ws.close()
+            except Exception as e:
+                log.debug("realtime.close.ws_error", error=str(e))
+            finally:
+                self.ws = None
+
         log.info("realtime.closed")

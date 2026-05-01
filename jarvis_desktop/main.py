@@ -113,7 +113,9 @@ class JarvisWebSocketApp:
         try:
             self.session = RealtimeSession(
                 on_transcript=self._on_transcript,
-                on_audio=self._on_audio
+                on_audio=self._on_audio,
+                on_status=self._on_status,
+                on_speaking=self._on_speaking,
             )
             
             await self.session.connect()
@@ -145,6 +147,18 @@ class JarvisWebSocketApp:
         
         if self.bridge:
             self.bridge.send_transcript(role, text)
+
+    def _on_status(self, state: str, message: str):
+        """Handle status updates from the realtime session."""
+        print(f"[status] {state}: {message}")
+
+        if self.bridge:
+            self.bridge.send_status(state, message)
+
+    def _on_speaking(self, is_speaking: bool):
+        """Handle speaking-state updates from the realtime session."""
+        if self.bridge:
+            self.bridge.set_speaking_state(is_speaking)
             
     def _on_audio(self, audio_bytes: bytes):
         """Handle audio OUTPUT from Realtime API (JARVIS speaking)."""
