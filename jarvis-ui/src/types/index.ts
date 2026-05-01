@@ -36,6 +36,7 @@ export type BackendMessage =
 
 export interface JarvisState {
   connectionState: ConnectionState
+  statusMessage: string
   messages: Message[]
   isRecording: boolean
   isSpeaking: boolean

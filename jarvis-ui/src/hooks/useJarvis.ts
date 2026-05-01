@@ -12,6 +12,7 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
 
   const {
     connectionState,
+    statusMessage,
     messages,
     isRecording: wsIsRecording,
     isSpeaking,
@@ -65,12 +66,13 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
 
   const state: JarvisState = useMemo(() => ({
     connectionState,
+    statusMessage,
     messages,
     isRecording: uiRecording,
     isSpeaking,
     audioLevel,
     currentTime
-  }), [connectionState, messages, uiRecording, isSpeaking, audioLevel, currentTime])
+  }), [connectionState, statusMessage, messages, uiRecording, isSpeaking, audioLevel, currentTime])
 
   const actions: JarvisActions = useMemo(() => ({
     toggleRecording: handleToggleRecording

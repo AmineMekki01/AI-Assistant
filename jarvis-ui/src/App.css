@@ -269,6 +269,20 @@
   text-transform: uppercase;
   font-weight: 500;
 }
+.hud-status-message {
+  margin-top: -4px;
+  padding: 10px 18px;
+  border: 1px solid rgba(0, 240, 255, 0.2);
+  border-radius: 999px;
+  background: rgba(0, 240, 255, 0.08);
+  color: var(--color-cyan);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  letter-spacing: 1px;
+  text-align: center;
+  max-width: min(100%, 520px);
+  box-shadow: 0 0 24px rgba(0, 240, 255, 0.12);
+}
 .jarvis-hud-wrapper {
   position: relative;
   width: 100%;

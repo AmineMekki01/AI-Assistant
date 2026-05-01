@@ -12,7 +12,8 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const { state, actions } = useJarvis()
 
-  const { connectionState, messages, isRecording, isSpeaking, audioLevel, currentTime } = state
+  const { connectionState, statusMessage, messages, isRecording, isSpeaking, audioLevel, currentTime } = state
+  const briefingStatusMessage = statusMessage.startsWith('Hang on') ? statusMessage : ''
 
   const latestMessage = messages[messages.length - 1]
 
@@ -70,6 +71,17 @@ function App() {
             isRecording={isRecording}
             audioLevel={audioLevel}
           />
+
+          {briefingStatusMessage && (
+            <motion.div
+              className="hud-status-message"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.35 }}
+            >
+              {briefingStatusMessage}
+            </motion.div>
+          )}
 
           <div className="time-display">
             <motion.span
