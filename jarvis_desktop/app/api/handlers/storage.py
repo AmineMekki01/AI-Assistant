@@ -181,11 +181,13 @@ async def handle_obsidian_sync(request):
             qdrant_status = await _index_to_qdrant(documents, vault_path)
         else:
             local_path = Path.home() / ".jarvis" / "obsidian_index.json"
+            local_path.parent.mkdir(parents=True, exist_ok=True)
             with open(local_path, 'w') as f:
                 json.dump(documents, f)
             qdrant_status = "Saved to local JSON"
 
         status_path = Path.home() / ".jarvis" / "obsidian_status.json"
+        status_path.parent.mkdir(parents=True, exist_ok=True)
         with open(status_path, 'w') as f:
             json.dump({
                 "synced": True,
