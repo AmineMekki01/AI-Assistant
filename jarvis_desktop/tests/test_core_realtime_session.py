@@ -6,6 +6,8 @@ import pytest
 
 from app.core import config as config_module
 from app.core import realtime_session as rs
+from app.memory import extractor as extractor_module
+from app.tools import memory as memory_tools
 
 
 class FakeResponse:
@@ -92,3 +94,35 @@ async def test_speak_direct_text_uses_openai_tts_voice(monkeypatch):
     assert speaking[-1] is False
     assert fake_process.wait_called is True
     assert FakeAsyncClient.last_instance.calls[0]["json"]["voice"] == "onyx"
+
+
+@pytest.mark.asyncio
+async def test_extract_and_maybe_store_memory_routes_candidates(monkeypatch):
+    stored = []
+
+    async def fake_extract_memory_candidates(transcript, use_llm=False):
+        if transcript == "no candidates":
+            return []
+        return [
+            SimpleNamespace(content="User is Amine", category="identity", confidence=0.95, source="pattern"),
+            SimpleNamespace(content="User likes tea", category="preference", confidence=0.88, source="pattern"),
+            SimpleNamespace(content="User wants to ship tests", category="goal", confidence=0.4, source="pattern"),
+        ]
+
+    async def fake_memory_remember(content, category):
+        stored.append((content, category))
+        return f"✓ Remembered [{category}]: {content}"
+
+    monkeypatch.setattr(rs, "load_all_capabilities", lambda: None)
+    monkeypatch.setattr(extractor_module, "extract_memory_candidates", fake_extract_memory_candidates)
+    monkeypatch.setattr(memory_tools, "memory_remember", fake_memory_remember)
+    monkeypatch.setenv("MEMORY_EXTRACT_THRESHOLD", "0.85")
+    monkeypatch.setenv("MEMORY_AUTO_CONFIRM_THRESHOLD", "0.9")
+
+    session = rs.RealtimeSession()
+
+    await session._extract_and_maybe_store_memory("no candidates")
+    assert stored == []
+
+    await session._extract_and_maybe_store_memory("I like tea")
+    assert stored == [("User is Amine", "identity")]
