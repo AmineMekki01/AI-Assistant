@@ -7,6 +7,7 @@ def register_routes(app):
 
     app.router.add_get('/api/health', handlers.handle_health)
     app.router.add_get('/api/health/dashboard', handlers.handle_dashboard_health)
+    app.router.add_get('/api/system/metrics', handlers.handle_system_metrics)
 
     app.router.add_get('/api/google/status', handlers.handle_google_status)
     app.router.add_post('/api/google/disconnect', handlers.handle_google_disconnect)

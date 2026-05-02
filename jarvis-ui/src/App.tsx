@@ -12,7 +12,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const { state, actions } = useJarvis()
 
-  const { connectionState, statusMessage, messages, isRecording, isSpeaking, audioLevel, currentTime } = state
+  const { connectionState, statusMessage, messages, isRecording, isSpeaking, audioLevel, currentTime, systemMetrics } = state
   const briefingStatusMessage = statusMessage.startsWith('Hang on') ? statusMessage : ''
 
   const latestMessage = messages[messages.length - 1]
@@ -98,7 +98,11 @@ function App() {
           <AudioWaveform isActive={isRecording || isSpeaking} audioLevel={audioLevel} />
         </motion.div>
 
-        <StatusPanel isRecording={isRecording} isSpeaking={isSpeaking} />
+        <StatusPanel
+          isRecording={isRecording}
+          isSpeaking={isSpeaking}
+          systemMetrics={systemMetrics}
+        />
       </main>
 
       <Footer

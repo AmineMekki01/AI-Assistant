@@ -28,6 +28,16 @@ export interface BackendSpeakingMessage {
   isSpeaking: boolean
 }
 
+export interface SystemMetrics {
+  location: string
+  temperature: number | null
+  temperatureUnit: 'celsius' | 'fahrenheit'
+  condition: string | null
+  latencyMs: number | null
+  status: 'ok' | 'missing_location' | 'error'
+  updatedAt: number | null
+}
+
 export type BackendMessage =
   | BackendStatusMessage
   | BackendConversationMessage
@@ -42,6 +52,7 @@ export interface JarvisState {
   isSpeaking: boolean
   audioLevel: number
   currentTime: Date
+  systemMetrics: SystemMetrics | null
 }
 
 export interface JarvisActions {

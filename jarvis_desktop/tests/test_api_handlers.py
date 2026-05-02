@@ -10,7 +10,7 @@ import pytest
 from aiohttp import web
 
 from app.api import routes
-from app.api.handlers import health, google, settings, storage
+from app.api.handlers import health, google, settings, storage, system
 from app.core import config as config_module
 from app.services import google_auth as google_auth_module
 
@@ -68,6 +68,45 @@ class FakeOAuthSession:
     def post(self, url, data=None):
         self.calls.append({"url": url, "data": data})
         return FakeOAuthRequestContext(self.response)
+
+
+class FakeSystemResponse:
+    def __init__(self, status: int, payload):
+        self.status = status
+        self._payload = payload or {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def json(self):
+        return self._payload
+
+
+class FakeSystemSession:
+    last_instance = None
+
+    def __init__(self, geocode_payload=None, weather_payload=None):
+        self.geocode_payload = geocode_payload or {}
+        self.weather_payload = weather_payload or {}
+        self.calls = []
+        FakeSystemSession.last_instance = self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, url, timeout=None):
+        self.calls.append({"url": url, "timeout": timeout})
+        if "geocoding-api.open-meteo.com" in url:
+            return FakeSystemResponse(200, self.geocode_payload)
+        if "api.open-meteo.com" in url:
+            return FakeSystemResponse(200, self.weather_payload)
+        return FakeSystemResponse(404, {})
 
 
 class FakeCredentials:
@@ -348,6 +387,66 @@ async def test_dashboard_health_probes_live_qdrant_connection(temp_home, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_system_metrics_returns_real_location_and_weather(temp_home, monkeypatch):
+    jarvis_dir = temp_home / ".jarvis"
+    jarvis_dir.mkdir(parents=True, exist_ok=True)
+    (jarvis_dir / "settings.json").write_text(json.dumps({
+        "personal": {
+            "defaultLocation": "New York, NY",
+            "preferences": {"temperatureUnit": "fahrenheit"}
+        }
+    }))
+
+    monkeypatch.setattr(system.Path, "home", lambda: temp_home)
+    fake_session = FakeSystemSession(
+        geocode_payload={
+            "results": [
+                {
+                    "name": "New York",
+                    "admin1": "NY",
+                    "country": "United States",
+                    "latitude": 40.7128,
+                    "longitude": -74.0060,
+                }
+            ]
+        },
+        weather_payload={
+            "current": {
+                "temperature_2m": 68.9,
+                "weather_code": 1,
+            }
+        },
+    )
+    monkeypatch.setattr(system.aiohttp, "ClientSession", lambda: fake_session)
+
+    response = await system.handle_system_metrics(FakeRequest())
+    payload = json.loads(response.text)
+
+    assert payload["status"] == "ok"
+    assert payload["location"] == "New York, NY, United States"
+    assert payload["temperature"] == 68.9
+    assert payload["temperatureUnit"] == "fahrenheit"
+    assert payload["condition"] == "Mostly clear"
+    assert len(fake_session.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_system_metrics_handles_missing_location(temp_home, monkeypatch):
+    jarvis_dir = temp_home / ".jarvis"
+    jarvis_dir.mkdir(parents=True, exist_ok=True)
+    (jarvis_dir / "settings.json").write_text(json.dumps({"personal": {"defaultLocation": ""}}))
+
+    monkeypatch.setattr(system.Path, "home", lambda: temp_home)
+
+    response = await system.handle_system_metrics(FakeRequest())
+    payload = json.loads(response.text)
+
+    assert payload["status"] == "missing_location"
+    assert payload["temperature"] is None
+    assert payload["location"] == "Set a default location in Personal settings"
+
+
+@pytest.mark.asyncio
 async def test_storage_helpers_and_routes(monkeypatch, temp_home):
     assert storage._chunk_text("") == []
     assert storage._chunk_text("one two") == ["one two"]
@@ -374,6 +473,7 @@ async def test_storage_helpers_and_routes(monkeypatch, temp_home):
     paths = [path for _, path, _ in fake_app.router.calls]
     assert "/api/health" in paths
     assert "/api/health/dashboard" in paths
+    assert "/api/system/metrics" in paths
     assert "/api/google/disconnect" in paths
     assert "/api/settings/load" in paths
     assert "/api/obsidian/sync" in paths
