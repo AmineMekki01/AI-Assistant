@@ -2,8 +2,8 @@
 API handlers organized by domain.
 """
 
-from .health import handle_health
-from .google import handle_google_status, handle_oauth_callback, handle_auth_success
+from .health import handle_health, handle_dashboard_health
+from .google import handle_google_status, handle_google_disconnect, handle_oauth_callback, handle_auth_success
 from .zimbra import handle_zimbra_test, handle_zimbra_status
 from .apple_calendar import (
     handle_apple_calendar_test,
@@ -21,7 +21,9 @@ from .settings import handle_save_settings, handle_load_settings
 
 __all__ = [
     "handle_health",
+    "handle_dashboard_health",
     "handle_google_status",
+    "handle_google_disconnect",
     "handle_oauth_callback",
     "handle_auth_success",
     "handle_zimbra_test",

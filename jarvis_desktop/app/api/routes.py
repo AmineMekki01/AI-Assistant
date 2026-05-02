@@ -6,8 +6,10 @@ def register_routes(app):
     """Register all API routes with the aiohttp app."""
 
     app.router.add_get('/api/health', handlers.handle_health)
+    app.router.add_get('/api/health/dashboard', handlers.handle_dashboard_health)
 
     app.router.add_get('/api/google/status', handlers.handle_google_status)
+    app.router.add_post('/api/google/disconnect', handlers.handle_google_disconnect)
     app.router.add_get('/auth/callback', handlers.handle_oauth_callback)
     app.router.add_get('/auth/success', handlers.handle_auth_success)
 

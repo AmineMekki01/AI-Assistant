@@ -10,7 +10,7 @@ except ImportError:
     Credentials = None
     _GOOGLE_AVAILABLE = False
 
-from ...services.google_auth import load_google_credentials, token_path
+from ...services.google_auth import clear_google_credentials, load_google_credentials, token_path
 
 
 async def handle_google_status(request):
@@ -34,6 +34,14 @@ async def handle_google_status(request):
         "connected": connected,
         "lastConnected": last_connected
     })
+
+
+async def handle_google_disconnect(request):
+    """Clear persisted Google credentials so the user can reconnect from scratch."""
+    token_file = token_path()
+    removed = clear_google_credentials(token_file)
+    print(f"🔐 [BACKEND] Google disconnect requested: removed={removed}")
+    return web.json_response({"connected": False, "removed": removed})
 
 
 async def handle_oauth_callback(request):
