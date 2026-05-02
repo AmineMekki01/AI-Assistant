@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useWebSocket } from './useWebSocket'
 import { useAudio } from './useAudio'
-import type { JarvisState, JarvisActions } from '../types'
+import type { JarvisState, JarvisActions, SystemMetrics } from '../types'
 
 export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
   const [currentTime, setCurrentTime] = useState(new Date())
   const [uiRecording, setUiRecording] = useState(false)
+  const [systemMetrics, setSystemMetrics] = useState<SystemMetrics | null>(null)
 
   const isRecordingRef = useRef(false)
   const isSpeakingRef = useRef(false)
@@ -19,6 +20,25 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
     toggleRecording,
     sendAudioChunk
   } = useWebSocket('ws://localhost:8000/ws')
+
+  const refreshSystemMetrics = useCallback(async () => {
+    const startedAt = performance.now()
+    try {
+      const response = await fetch('http://localhost:8001/api/system/metrics')
+      if (!response.ok) {
+        setSystemMetrics(prev => prev ? { ...prev, latencyMs: Math.round(performance.now() - startedAt), status: 'error' } : null)
+        return
+      }
+
+      const data = await response.json() as Omit<SystemMetrics, 'latencyMs'>
+      setSystemMetrics({
+        ...data,
+        latencyMs: Math.round(performance.now() - startedAt)
+      })
+    } catch {
+      setSystemMetrics(prev => prev ? { ...prev, latencyMs: Math.round(performance.now() - startedAt), status: 'error' } : null)
+    }
+  }, [])
 
   useEffect(() => {
     isSpeakingRef.current = isSpeaking
@@ -50,6 +70,12 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
     return () => clearInterval(timer)
   }, [])
 
+  useEffect(() => {
+    refreshSystemMetrics()
+    const timer = setInterval(refreshSystemMetrics, 60000)
+    return () => clearInterval(timer)
+  }, [refreshSystemMetrics])
+
   const handleToggleRecording = useCallback(() => {
     const newState = !isRecordingRef.current
     isRecordingRef.current = newState
@@ -71,8 +97,9 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
     isRecording: uiRecording,
     isSpeaking,
     audioLevel,
-    currentTime
-  }), [connectionState, statusMessage, messages, uiRecording, isSpeaking, audioLevel, currentTime])
+    currentTime,
+    systemMetrics
+  }), [connectionState, statusMessage, messages, uiRecording, isSpeaking, audioLevel, currentTime, systemMetrics])
 
   const actions: JarvisActions = useMemo(() => ({
     toggleRecording: handleToggleRecording
