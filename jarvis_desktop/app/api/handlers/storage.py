@@ -91,6 +91,9 @@ async def handle_qdrant_test(request):
 
         return web.json_response({"ok": True})
     except Exception as e:
+        print(f"X [BACKEND] Qdrant test failed for {host}:{port}/{collection_name}: {e}")
+        import traceback
+        traceback.print_exc()
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 

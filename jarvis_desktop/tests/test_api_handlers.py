@@ -12,6 +12,7 @@ from aiohttp import web
 from app.api import routes
 from app.api.handlers import health, google, settings, storage
 from app.core import config as config_module
+from app.services import google_auth as google_auth_module
 
 
 class FakeRequest:
@@ -196,6 +197,20 @@ async def test_google_status_reports_disconnected_without_token(temp_home, monke
 
 
 @pytest.mark.asyncio
+async def test_google_disconnect_clears_token_file(temp_home, monkeypatch):
+    token_file = temp_home / ".jarvis" / "google_token.json"
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.write_text("{}")
+    monkeypatch.setattr(google, "token_path", lambda: token_file)
+
+    response = await google.handle_google_disconnect(FakeRequest())
+    payload = json.loads(response.text)
+
+    assert payload == {"connected": False, "removed": True}
+    assert not token_file.exists()
+
+
+@pytest.mark.asyncio
 async def test_google_status_reports_invalid_token_when_loading_fails(temp_home, monkeypatch):
     token_file = temp_home / ".jarvis" / "google_token.json"
     token_file.parent.mkdir(parents=True, exist_ok=True)
@@ -277,6 +292,62 @@ async def test_auth_success_returns_html_page():
 
 
 @pytest.mark.asyncio
+async def test_dashboard_health_aggregates_cached_statuses(temp_home, monkeypatch):
+    jarvis_dir = temp_home / ".jarvis"
+    jarvis_dir.mkdir(parents=True, exist_ok=True)
+
+    (jarvis_dir / "qdrant_status.json").write_text(json.dumps({"connected": True, "collectionExists": True}))
+    (jarvis_dir / "obsidian_status.json").write_text(json.dumps({"synced": True, "lastSync": 123.0, "fileCount": 5}))
+    (jarvis_dir / "zimbra_status.json").write_text(json.dumps({"configured": True, "ok": True, "lastTested": 456.0}))
+    (jarvis_dir / "apple_calendar_status.json").write_text(json.dumps({"enabled": True, "available": True, "ok": True, "lastTested": 789.0}))
+
+    token_file = jarvis_dir / "google_token.json"
+    token_file.write_text("{}")
+    monkeypatch.setattr(health.Path, "home", lambda: temp_home)
+    monkeypatch.setattr(google_auth_module, "token_path", lambda: token_file)
+    monkeypatch.setattr(google_auth_module, "load_google_credentials", lambda path, repair=False: (SimpleNamespace(), False))
+
+    response = await health.handle_dashboard_health(FakeRequest())
+    payload = json.loads(response.text)
+
+    assert payload["status"] == "ok"
+    assert payload["google"]["connected"] is True
+    assert payload["qdrant"]["connected"] is True
+    assert payload["obsidian"]["synced"] is True
+    assert payload["zimbra"]["ok"] is True
+    assert payload["appleCalendar"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_dashboard_health_probes_live_qdrant_connection(temp_home, monkeypatch):
+    jarvis_dir = temp_home / ".jarvis"
+    jarvis_dir.mkdir(parents=True, exist_ok=True)
+    (jarvis_dir / "qdrant_status.json").write_text(json.dumps({
+        "host": "localhost",
+        "port": 6333,
+        "collectionName": "jarvis_knowledge",
+        "apiKey": None,
+    }))
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def get_collections(self):
+            return SimpleNamespace(collections=[SimpleNamespace(name="jarvis_knowledge")])
+
+    monkeypatch.setattr(health, "Path", health.Path)
+    monkeypatch.setattr("qdrant_client.QdrantClient", FakeClient)
+
+    response = await health.handle_dashboard_health(FakeRequest())
+    payload = json.loads(response.text)
+
+    assert payload["qdrant"]["connected"] is True
+    assert payload["qdrant"]["collectionExists"] is True
+
+
+@pytest.mark.asyncio
 async def test_storage_helpers_and_routes(monkeypatch, temp_home):
     assert storage._chunk_text("") == []
     assert storage._chunk_text("one two") == ["one two"]
@@ -302,6 +373,8 @@ async def test_storage_helpers_and_routes(monkeypatch, temp_home):
     routes.register_routes(fake_app)
     paths = [path for _, path, _ in fake_app.router.calls]
     assert "/api/health" in paths
+    assert "/api/health/dashboard" in paths
+    assert "/api/google/disconnect" in paths
     assert "/api/settings/load" in paths
     assert "/api/obsidian/sync" in paths
 
@@ -326,6 +399,24 @@ async def test_qdrant_status_and_test_handlers(monkeypatch, temp_home):
     assert json.loads(ok.text) == {"ok": True}
     saved = json.loads(status_file.read_text())
     assert saved["collectionName"] == "jarvis_knowledge"
+
+
+@pytest.mark.asyncio
+async def test_qdrant_test_reports_backend_errors(monkeypatch):
+    class RaisingQdrantClient:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("connection refused")
+
+    _install_fake_qdrant_modules(monkeypatch, RaisingQdrantClient)
+
+    response = await storage.handle_qdrant_test(
+        FakeRequest(payload={"host": "localhost", "port": 6333, "collectionName": "jarvis_knowledge"})
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 500
+    assert payload["ok"] is False
+    assert "connection refused" in payload["error"]
 
 
 @pytest.mark.asyncio

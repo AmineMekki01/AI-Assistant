@@ -18,8 +18,8 @@
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: var(--radius-xl);
   width: 100%;
-  max-width: 700px;
-  max-height: 85vh;
+  max-width: 980px;
+  max-height: 90vh;
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-glass);
@@ -33,7 +33,7 @@
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 .settings-header h2 {
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 600;
   margin: 0;
 }
@@ -61,31 +61,34 @@
   padding: var(--spacing-md) var(--spacing-xl);
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   overflow-x: auto;
+  background: rgba(255, 255, 255, 0.02);
 }
 .settings-tabs button {
-  padding: var(--spacing-sm) var(--spacing-md);
-  border: none;
-  background: transparent;
+  padding: 10px 16px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.03);
   color: var(--text-muted);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-full);
   transition: all var(--transition-fast);
   white-space: nowrap;
 }
 .settings-tabs button:hover {
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(255, 255, 255, 0.07);
 }
 .settings-tabs button.active {
   color: var(--cyan);
-  background: rgba(0, 240, 255, 0.1);
+  background: rgba(0, 240, 255, 0.12);
+  border-color: rgba(0, 240, 255, 0.18);
+  box-shadow: 0 0 0 1px rgba(0, 240, 255, 0.08) inset;
 }
 .settings-content {
   flex: 1;
   overflow-y: auto;
-  padding: var(--spacing-lg) var(--spacing-xl);
+  padding: var(--spacing-xl);
 }
 .tab-content {
   display: flex;
@@ -93,10 +96,19 @@
   gap: var(--spacing-lg);
 }
 .settings-section {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: var(--radius-lg);
-  padding: var(--spacing-lg);
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.025));
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: calc(var(--radius-lg) + 2px);
+  padding: var(--spacing-xl);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.12);
+  transition: transform var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.settings-section:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 24px 44px rgba(0, 0, 0, 0.16);
 }
 .section-header {
   display: flex;
@@ -139,6 +151,115 @@
 .status-badge.error {
   background: rgba(239, 68, 68, 0.2);
   color: var(--red);
+}
+.dashboard-section {
+  background: linear-gradient(180deg, rgba(0, 240, 255, 0.08), rgba(255, 255, 255, 0.03));
+  border-color: rgba(0, 240, 255, 0.12);
+}
+.dashboard-hero {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--spacing-xl);
+  align-items: flex-start;
+  margin-bottom: var(--spacing-lg);
+}
+.dashboard-eyebrow {
+  margin: 0 0 var(--spacing-xs) 0;
+  color: var(--cyan);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  font-weight: 700;
+}
+.dashboard-section .section-desc {
+  max-width: 58ch;
+}
+.dashboard-summary-card {
+  min-width: 180px;
+  margin-top: 2px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+  padding: var(--spacing-lg);
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(0, 240, 255, 0.14);
+  background: rgba(0, 0, 0, 0.16);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.dashboard-summary-count {
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-primary);
+}
+.dashboard-summary-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+}
+.dashboard-grid {
+  margin-top: var(--spacing-md);
+}
+.dashboard-grid .status-item {
+  min-height: 92px;
+  padding: var(--spacing-md);
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.14);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  transition: transform var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+}
+.dashboard-grid .status-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(0, 240, 255, 0.14);
+  background: rgba(0, 240, 255, 0.04);
+}
+.dashboard-grid .status-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+.dashboard-grid .status-value {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.dashboard-grid .status-value.active {
+  color: var(--cyan);
+}
+.qdrant-section {
+  border-left: 3px solid rgba(0, 240, 255, 0.75);
+}
+.google-section {
+  border-left: 3px solid rgba(66, 133, 244, 0.85);
+}
+.obsidian-section {
+  border-left: 3px solid rgba(139, 92, 246, 0.8);
+}
+.zimbra-section {
+  border-left: 3px solid rgba(245, 158, 11, 0.85);
+}
+.apple-calendar-section {
+  border-left: 3px solid rgba(236, 72, 153, 0.8);
+}
+.settings-section .button-group {
+  flex-wrap: wrap;
+}
+.settings-section .button-group .btn-primary,
+.settings-section .button-group .btn-secondary,
+.settings-section .button-group .btn-danger {
+  min-width: 140px;
+}
+.settings-section .button-group .btn-primary,
+.settings-section .button-group .btn-secondary,
+.settings-section .button-group .btn-danger {
+  flex: 1 1 160px;
 }
 .form-group {
   margin-bottom: var(--spacing-md);
@@ -239,6 +360,7 @@
   background: var(--cyan);
 }
 input[type="range"] {
+  appearance: none;
   -webkit-appearance: none;
   width: 100%;
   height: 6px;
@@ -432,8 +554,50 @@ button:disabled {
   .settings-modal {
     max-height: 95vh;
   }
+  .settings-header {
+    padding: var(--spacing-md) var(--spacing-lg);
+  }
+  .settings-header h2 {
+    font-size: 20px;
+  }
+  .settings-tabs {
+    flex-wrap: wrap;
+    gap: var(--spacing-xs);
+    padding: var(--spacing-sm) var(--spacing-md);
+  }
+  .settings-tabs button {
+    flex: 1 1 calc(50% - var(--spacing-xs));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
   .settings-content {
     padding: var(--spacing-md);
+  }
+  .tab-content {
+    gap: var(--spacing-md);
+  }
+  .settings-section {
+    padding: var(--spacing-md);
+  }
+  .dashboard-hero {
+    flex-direction: column;
+  }
+  .dashboard-summary-card {
+    width: 100%;
+    min-width: 0;
+    align-items: flex-start;
+  }
+  .dashboard-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .dashboard-grid .status-item {
+    min-height: auto;
+  }
+  .settings-section .button-group .btn-primary,
+  .settings-section .button-group .btn-secondary,
+  .settings-section .button-group .btn-danger {
+    width: 100%;
   }
   .form-grid {
     grid-template-columns: 1fr;
@@ -442,11 +606,8 @@ button:disabled {
     flex-direction: column;
     gap: var(--spacing-md);
   }
-  .settings-tabs {
-    padding: var(--spacing-sm) var(--spacing-md);
-  }
   .settings-tabs button {
     font-size: 12px;
-    padding: var(--spacing-xs) var(--spacing-sm);
+    padding: 10px 12px;
   }
 }

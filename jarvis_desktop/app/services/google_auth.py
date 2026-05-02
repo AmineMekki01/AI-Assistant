@@ -24,6 +24,20 @@ def token_path() -> Path:
     return Path(os.path.expanduser(os.getenv("GOOGLE_TOKEN_PATH", str(DEFAULT_TOKEN_PATH))))
 
 
+def clear_google_credentials(path: str | Path | None = None) -> bool:
+    """Delete persisted Google credentials if they exist.
+
+    Returns ``True`` when a token file was removed, ``False`` when there was
+    nothing to delete.
+    """
+    token_file = Path(path) if path is not None else token_path()
+    if not token_file.exists():
+        return False
+
+    token_file.unlink()
+    return True
+
+
 def _scopes_from_payload(payload: dict[str, Any]) -> list[str]:
     scopes = payload.get("scopes")
     if isinstance(scopes, str):

@@ -1,117 +1,198 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useSettings } from '../../../hooks/useSettings'
 
 export function IntegrationsTab() {
   const settings = useSettings()
+  const {
+    checkDashboardHealth,
+    listAppleCalendars,
+    disconnectGoogle,
+    initiateGoogleAuth,
+    testQdrantConnection,
+    bootstrapQdrant: createQdrantCollection,
+    syncObsidian: runObsidianSync,
+    checkQdrantStatus,
+    checkObsidianStatus,
+    testZimbraConnection,
+    checkZimbraStatus,
+    testAppleCalendar,
+    checkAppleCalendarStatus,
+  } = settings
+  const [dashboardHealth, setDashboardHealth] = useState<Awaited<ReturnType<typeof settings.checkDashboardHealth>> | null>(null)
   const [qdrantStatus, setQdrantStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
   const [obsidianStatus, setObsidianStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle')
   const [googleStatus, setGoogleStatus] = useState<{connected: boolean, lastConnected?: number} | null>(null)
-  const [qdrantDetails, setQdrantDetails] = useState<{connected: boolean, lastChecked?: number, collectionExists?: boolean} | null>(null)
-  const [obsidianDetails, setObsidianDetails] = useState<{synced: boolean, lastSync?: number, fileCount?: number} | null>(null)
+  const [qdrantDetails, setQdrantDetails] = useState<{connected: boolean, lastChecked?: number | null, collectionExists?: boolean} | null>(null)
+  const [obsidianDetails, setObsidianDetails] = useState<{synced: boolean, lastSync?: number | null, fileCount?: number} | null>(null)
   const [zimbraStatus, setZimbraStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
-  const [zimbraDetails, setZimbraDetails] = useState<{configured: boolean, lastTested?: number, ok?: boolean} | null>(null)
+  const [zimbraDetails, setZimbraDetails] = useState<{configured: boolean, lastTested?: number | null, ok?: boolean | null} | null>(null)
   const [zimbraError, setZimbraError] = useState<string | null>(null)
   const [appleCalStatus, setAppleCalStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
-  const [appleCalDetails, setAppleCalDetails] = useState<{enabled: boolean, available: boolean, lastTested?: number, ok?: boolean} | null>(null)
+  const [appleCalDetails, setAppleCalDetails] = useState<{enabled: boolean, available: boolean, lastTested?: number | null, ok?: boolean | null} | null>(null)
   const [appleCalError, setAppleCalError] = useState<string | null>(null)
   const [appleCalendars, setAppleCalendars] = useState<string[]>([])
   const [syncResult, setSyncResult] = useState<{totalFiles?: number, indexed?: number, qdrantStatus?: string} | null>(null)
 
+  const dashboardOnlineCount = dashboardHealth
+    ? [
+        dashboardHealth.google.connected,
+        dashboardHealth.qdrant.connected,
+        dashboardHealth.obsidian.synced,
+        dashboardHealth.zimbra.ok === true,
+        dashboardHealth.appleCalendar.ok === true,
+        dashboardHealth.music.available,
+      ].filter(Boolean).length
+    : 0
+  const dashboardTotalCount = 6
+
+  const refreshDashboard = useCallback(async () => {
+    const [health, calendars] = await Promise.all([
+      checkDashboardHealth(),
+      listAppleCalendars(),
+    ])
+
+    if (health) {
+      setDashboardHealth(health)
+      setGoogleStatus({ connected: health.google.connected, lastConnected: health.google.lastConnected ?? undefined })
+      setQdrantDetails(health.qdrant)
+      setQdrantStatus(health.qdrant.connected ? 'success' : 'idle')
+      setObsidianDetails(health.obsidian)
+      setObsidianStatus(health.obsidian.synced ? 'success' : 'idle')
+      setZimbraDetails(health.zimbra)
+      if (health.zimbra.ok === true) setZimbraStatus('success')
+      else if (health.zimbra.ok === false) setZimbraStatus('error')
+      else setZimbraStatus('idle')
+      setAppleCalDetails(health.appleCalendar)
+      if (health.appleCalendar.ok === true) setAppleCalStatus('success')
+      else if (health.appleCalendar.ok === false) setAppleCalStatus('error')
+      else setAppleCalStatus('idle')
+    }
+
+    if (calendars.length > 0) {
+      setAppleCalendars(calendars)
+    }
+  }, [checkDashboardHealth, listAppleCalendars])
+
   useEffect(() => {
-    settings.checkGoogleConnection().then(connected => {
-      setGoogleStatus({ connected })
-    })
-    settings.checkQdrantStatus().then(status => {
-      if (status) {
-        setQdrantDetails(status)
-        setQdrantStatus(status.connected ? 'success' : 'idle')
-      }
-    })
-    settings.checkObsidianStatus().then(status => {
-      if (status) {
-        setObsidianDetails(status)
-      }
-    })
-    settings.checkZimbraStatus().then(status => {
-      if (status) {
-        setZimbraDetails(status)
-        if (status.ok === true) setZimbraStatus('success')
-        else if (status.ok === false) setZimbraStatus('error')
-      }
-    })
-    settings.checkAppleCalendarStatus().then(status => {
-      if (status) {
-        setAppleCalDetails(status)
-        if (status.ok === true) setAppleCalStatus('success')
-        else if (status.ok === false) setAppleCalStatus('error')
-      }
-    })
-    settings.listAppleCalendars().then(setAppleCalendars)
-  }, [])
+    refreshDashboard()
+  }, [refreshDashboard])
 
   const testZimbra = async () => {
     setZimbraStatus('testing')
     setZimbraError(null)
-    const result = await settings.testZimbraConnection()
+    const result = await testZimbraConnection()
     setZimbraStatus(result.ok ? 'success' : 'error')
     setZimbraError(result.ok ? null : result.error || 'Connection failed')
-    const status = await settings.checkZimbraStatus()
+    const status = await checkZimbraStatus()
     if (status) setZimbraDetails(status)
   }
 
   const testAppleCal = async () => {
     setAppleCalStatus('testing')
     setAppleCalError(null)
-    const result = await settings.testAppleCalendar()
+    const result = await testAppleCalendar()
     setAppleCalStatus(result.ok ? 'success' : 'error')
     setAppleCalError(result.ok ? null : result.error || 'Apple Calendar permission denied')
-    const status = await settings.checkAppleCalendarStatus()
+    const status = await checkAppleCalendarStatus()
     if (status) setAppleCalDetails(status)
     if (result.ok) {
-      const names = await settings.listAppleCalendars()
+      const names = await listAppleCalendars()
       setAppleCalendars(names)
     }
   }
 
   const testQdrant = async () => {
     setQdrantStatus('testing')
-    const ok = await settings.testQdrantConnection()
+    const ok = await testQdrantConnection()
     setQdrantStatus(ok ? 'success' : 'error')
-    const status = await settings.checkQdrantStatus()
+    const status = await checkQdrantStatus()
     if (status) setQdrantDetails(status)
+    if (ok) {
+      await refreshDashboard()
+    }
   }
 
   const bootstrapQdrant = async () => {
     setQdrantStatus('testing')
-    const ok = await settings.bootstrapQdrant()
+    const ok = await createQdrantCollection()
     setQdrantStatus(ok ? 'success' : 'error')
+    await refreshDashboard()
   }
 
   const syncObsidian = async () => {
     setObsidianStatus('syncing')
     setSyncResult(null)
-    const result = await settings.syncObsidian()
+    const result = await runObsidianSync()
     setObsidianStatus(result ? 'success' : 'error')
     if (result && typeof result === 'object') {
       setSyncResult(result)
     }
-    const status = await settings.checkObsidianStatus()
+    const status = await checkObsidianStatus()
     if (status) setObsidianDetails(status)
+    await refreshDashboard()
+  }
+
+  const handleGoogleToggle = async () => {
+    if (googleStatus?.connected) {
+      await disconnectGoogle()
+    } else {
+      initiateGoogleAuth()
+      return
+    }
+
+    await refreshDashboard()
   }
 
   return (
     <div className="tab-content">
-      <section className="settings-section">
+      <section className="settings-section dashboard-section">
+        <div className="dashboard-hero">
+          <div>
+            <p className="dashboard-eyebrow">Control center</p>
+            <h3>🩺 Connections &amp; Integrations</h3>
+            <p className="section-desc">
+              Live backend and integration status at a glance. Use this to see what is connected,
+              what is ready, and what still needs attention.
+            </p>
+          </div>
+
+          <div className="dashboard-summary-card">
+            <div className="dashboard-summary-count">{dashboardOnlineCount}/{dashboardTotalCount}</div>
+            <div className="dashboard-summary-label">services ready</div>
+            <span className={`status-badge ${dashboardHealth?.status === 'ok' ? 'success' : 'idle'}`}>
+              {dashboardHealth?.status === 'ok' ? 'Live snapshot' : 'Refreshing...'}
+            </span>
+          </div>
+        </div>
+
+        <div className="status-grid dashboard-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+          <div className="status-item"><span className="status-label">Backend</span><span className={`status-value ${dashboardHealth?.status === 'ok' ? 'active' : ''}`}>{dashboardHealth?.status === 'ok' ? 'ONLINE' : 'CHECKING'}</span></div>
+          <div className="status-item"><span className="status-label">Google</span><span className={`status-value ${dashboardHealth?.google.connected ? 'active' : ''}`}>{dashboardHealth?.google.connected ? 'CONNECTED' : 'DISCONNECTED'}</span></div>
+          <div className="status-item"><span className="status-label">Qdrant</span><span className={`status-value ${dashboardHealth?.qdrant.connected ? 'active' : ''}`}>{dashboardHealth?.qdrant.connected ? 'CONNECTED' : 'DISCONNECTED'}</span></div>
+          <div className="status-item"><span className="status-label">Obsidian</span><span className={`status-value ${dashboardHealth?.obsidian.synced ? 'active' : ''}`}>{dashboardHealth?.obsidian.synced ? 'SYNCED' : 'NOT SYNCED'}</span></div>
+          <div className="status-item"><span className="status-label">Zimbra</span><span className={`status-value ${dashboardHealth?.zimbra.ok === true ? 'active' : ''}`}>{dashboardHealth?.zimbra.ok === true ? 'CONNECTED' : 'NOT TESTED'}</span></div>
+          <div className="status-item"><span className="status-label">Apple Calendar</span><span className={`status-value ${dashboardHealth?.appleCalendar.ok === true ? 'active' : ''}`}>{dashboardHealth?.appleCalendar.ok === true ? 'AVAILABLE' : 'NOT TESTED'}</span></div>
+          <div className="status-item"><span className="status-label">Music</span><span className={`status-value ${dashboardHealth?.music.available ? 'active' : ''}`}>{dashboardHealth?.music.available ? `${dashboardHealth.music.librarySize} TRACKS` : 'UNAVAILABLE'}</span></div>
+        </div>
+
+        <div className="button-group">
+          <button className="btn-secondary" onClick={refreshDashboard}>
+            Refresh All
+          </button>
+        </div>
+      </section>
+
+      <section className="settings-section qdrant-section">
         <div className="section-header">
           <h3>🗄️ Qdrant Vector Database</h3>
           <span className={`status-badge ${qdrantStatus}`}>
             {qdrantStatus === 'idle' && 'Not Tested'}
             {qdrantStatus === 'testing' && 'Testing...'}
             {qdrantStatus === 'success' && 'Connected'}
-            {qdrantStatus === 'error' && 'Failed'}
+            {qdrantStatus === 'error' && 'Needs Attention'}
           </span>
         </div>
-        <p className="section-desc">Configure your vector database for knowledge storage and retrieval</p>
+        <p className="section-desc">Configure the vector store that powers memory and knowledge retrieval.</p>
 
         {qdrantDetails?.lastChecked && (
           <p className="last-sync">
@@ -169,10 +250,12 @@ export function IntegrationsTab() {
           </button>
         </div>
 
-        {settings.error && <div className="error-message">{settings.error}</div>}
+        {qdrantStatus === 'error' && settings.error && (
+          <div className="error-message">Qdrant test failed: {settings.error}</div>
+        )}
       </section>
 
-      <section className="settings-section">
+      <section className="settings-section obsidian-section">
         <div className="section-header">
           <h3>📝 Obsidian Vault</h3>
           <span className={`status-badge ${obsidianStatus}`}>
@@ -220,25 +303,27 @@ export function IntegrationsTab() {
           </label>
         </div>
 
-        <button
-          className="btn-primary"
-          onClick={syncObsidian}
-          disabled={!settings.settings.obsidian.vaultPath || obsidianStatus === 'syncing'}
-        >
-          {obsidianStatus === 'syncing' ? 'Syncing...' : 'Sync Now'}
-        </button>
+        <div className="button-group">
+          <button
+            className="btn-primary"
+            onClick={syncObsidian}
+            disabled={!settings.settings.obsidian.vaultPath || obsidianStatus === 'syncing'}
+          >
+            {obsidianStatus === 'syncing' ? 'Syncing...' : 'Sync Now'}
+          </button>
+        </div>
 
         {syncResult && (
           <div className="sync-result">
             <p><strong>✅ Sync Complete!</strong></p>
-            <p>Files found: {syncResult.totalFiles}</p>
-            <p>Files indexed: {syncResult.indexed}</p>
-            <p>Vector DB: {syncResult.qdrantStatus}</p>
+            <p>Files found: {syncResult?.totalFiles ?? 0}</p>
+            <p>Files indexed: {syncResult?.indexed ?? 0}</p>
+            <p>Vector DB: {syncResult?.qdrantStatus ?? 'unknown'}</p>
           </div>
         )}
       </section>
 
-      <section className="settings-section">
+      <section className="settings-section google-section">
         <div className="section-header">
           <h3>📧 Google Integration</h3>
           <span className={`status-badge ${googleStatus?.connected ? 'success' : 'idle'}`}>
@@ -288,19 +373,19 @@ export function IntegrationsTab() {
           {!googleStatus?.connected ? (
             <button
               className="btn-primary"
-              onClick={settings.initiateGoogleAuth}
+              onClick={handleGoogleToggle}
               disabled={!settings.settings.google.clientId}
             >
-              Connect Google Account
+              {settings.settings.google.enabled ? 'Reconnect Google Account' : 'Connect Google Account'}
             </button>
           ) : (
-            <button className="btn-danger" onClick={() => {
-              settings.disconnectGoogle()
-              setGoogleStatus({ connected: false })
-            }}>
+            <button className="btn-danger" onClick={handleGoogleToggle}>
               Disconnect
             </button>
           )}
+          <button className="btn-secondary" onClick={refreshDashboard}>
+            Refresh Status
+          </button>
         </div>
 
         <div className="info-box">
@@ -315,7 +400,7 @@ export function IntegrationsTab() {
         </div>
       </section>
 
-      <section className="settings-section">
+      <section className="settings-section zimbra-section">
         <div className="section-header">
           <h3>✉️ Secondary Mailbox (Zimbra / OVH / IMAP)</h3>
           <span className={`status-badge ${zimbraStatus}`}>
@@ -460,7 +545,7 @@ export function IntegrationsTab() {
       </section>
 
       {/* Apple Calendar Section */}
-      <section className="settings-section">
+      <section className="settings-section apple-calendar-section">
         <div className="section-header">
           <h3>🗓️ Apple Calendar (macOS)</h3>
           <span className={`status-badge ${appleCalStatus}`}>

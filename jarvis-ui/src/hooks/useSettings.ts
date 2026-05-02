@@ -53,6 +53,17 @@ export interface PersonalInfo {
   }
 }
 
+export interface DashboardHealthSnapshot {
+  service: string
+  status: string
+  google: { connected: boolean; lastConnected?: number | null; tokenPresent?: boolean }
+  qdrant: { connected: boolean; collectionExists?: boolean; lastChecked?: number | null }
+  obsidian: { synced: boolean; lastSync?: number | null; fileCount?: number }
+  zimbra: { configured: boolean; ok?: boolean | null; lastTested?: number | null }
+  appleCalendar: { enabled: boolean; available: boolean; ok?: boolean | null; lastTested?: number | null }
+  music: { available: boolean; librarySize: number; cacheFresh: boolean }
+}
+
 export interface Settings {
   qdrant: QdrantConfig
   obsidian: ObsidianConfig
@@ -207,12 +218,18 @@ export function useSettings() {
         body: JSON.stringify({
           host: settings.qdrant.host,
           port: settings.qdrant.port,
-          collection: settings.qdrant.collectionName
+          collectionName: settings.qdrant.collectionName
         })
       })
       setIsLoading(false)
       const data = await response.json()
-      return data.connected || false
+      if (data.ok) {
+        return true
+      }
+      if (data.error) {
+        setError(data.error)
+      }
+      return false
     } catch (err) {
       setIsLoading(false)
       setError(err instanceof Error ? err.message : 'Failed to connect to Qdrant')
@@ -248,6 +265,16 @@ export function useSettings() {
       return false
     }
   }, [settings.qdrant])
+
+  const getGoogleStatus = useCallback(async (): Promise<{ connected: boolean; lastConnected?: number | null } | null> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/google/status`)
+      if (!response.ok) return null
+      return await response.json()
+    } catch {
+      return null
+    }
+  }, [])
 
   const testObsidianConnection = useCallback(async (): Promise<boolean> => {
     if (!settings.obsidian.vaultPath) return false
@@ -314,7 +341,15 @@ export function useSettings() {
     )
   }, [settings.google])
 
-  const disconnectGoogle = useCallback(() => {
+  const disconnectGoogle = useCallback(async () => {
+    try {
+      await fetch(`${API_BASE_URL}/api/google/disconnect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      })
+    } catch {
+    }
+
     updateGoogle({
       accessToken: undefined,
       refreshToken: undefined,
@@ -324,20 +359,12 @@ export function useSettings() {
   }, [updateGoogle])
 
   const checkGoogleConnection = useCallback(async (): Promise<boolean> => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/google/status`)
-      if (response.ok) {
-        const data = await response.json()
-        if (data.connected && !settings.google.enabled) {
-          updateGoogle({ enabled: true })
-        }
-        return data.connected
-      }
-      return false
-    } catch (err) {
-      return false
+    const status = await getGoogleStatus()
+    if (status?.connected && !settings.google.enabled) {
+      updateGoogle({ enabled: true })
     }
-  }, [settings.google.enabled, updateGoogle])
+    return status?.connected ?? false
+  }, [getGoogleStatus, settings.google.enabled, updateGoogle])
 
   const checkQdrantStatus = useCallback(async () => {
     try {
@@ -347,6 +374,16 @@ export function useSettings() {
       }
       return null
     } catch (err) {
+      return null
+    }
+  }, [])
+
+  const checkDashboardHealth = useCallback(async (): Promise<DashboardHealthSnapshot | null> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/health/dashboard`)
+      if (!response.ok) return null
+      return await response.json()
+    } catch {
       return null
     }
   }, [])
@@ -491,6 +528,8 @@ export function useSettings() {
     listAppleCalendars,
     checkQdrantStatus,
     checkObsidianStatus,
+    getGoogleStatus,
+    checkDashboardHealth,
     saveSettings,
     loadSettings,
     clearError: () => setError(null)
