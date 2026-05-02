@@ -28,6 +28,15 @@ export interface BackendSpeakingMessage {
   isSpeaking: boolean
 }
 
+export interface BackendMailDraftMessage {
+  type: 'mail_draft'
+  account: 'gmail' | 'zimbra'
+  to: string
+  subject: string
+  body: string
+  rawText: string
+}
+
 export interface SystemMetrics {
   location: string
   temperature: number | null
@@ -38,11 +47,20 @@ export interface SystemMetrics {
   updatedAt: number | null
 }
 
+export interface MailDraft {
+  account: 'gmail' | 'zimbra'
+  to: string
+  subject: string
+  body: string
+  rawText: string
+}
+
 export type BackendMessage =
   | BackendStatusMessage
   | BackendConversationMessage
   | BackendRecordingMessage
   | BackendSpeakingMessage
+  | BackendMailDraftMessage
 
 export interface JarvisState {
   connectionState: ConnectionState
@@ -53,8 +71,12 @@ export interface JarvisState {
   audioLevel: number
   currentTime: Date
   systemMetrics: SystemMetrics | null
+  pendingMailDraft: MailDraft | null
 }
 
 export interface JarvisActions {
   toggleRecording: () => void
+  updateMailDraftField: (field: 'to' | 'subject' | 'body', value: string) => void
+  confirmMailDraft: () => void
+  cancelMailDraft: () => void
 }

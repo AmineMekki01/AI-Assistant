@@ -145,6 +145,12 @@ async def test_websocket_bridge_recording_audio_and_message_paths(monkeypatch):
     await bridge._handle_message(object(), json.dumps({"type": "audio_chunk", "data": "abc"}))
     assert audio_calls[-1] == {"type": "audio_chunk", "data": "abc"}
 
+    confirmation_calls = []
+    bridge._on_mail_confirmation = confirmation_calls.append
+    await bridge._handle_message(object(), json.dumps({"type": "confirm_mail_draft", "accepted": True}))
+    await bridge._handle_message(object(), json.dumps({"type": "confirm_mail_draft", "accepted": False}))
+    assert confirmation_calls == [True, False]
+
     captured = []
     def fake_run_coroutine_threadsafe(coro, loop):
         captured.append((coro, loop))

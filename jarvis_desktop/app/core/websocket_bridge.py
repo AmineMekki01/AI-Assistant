@@ -28,6 +28,7 @@ class WebSocketBridge:
         on_audio: Optional[Callable[[bytes], None]] = None,
         on_commit: Optional[Callable[[], None]] = None,
         on_recording_start: Optional[Callable[[], None]] = None,
+        on_mail_confirmation: Optional[Callable[[dict[str, Any]], None]] = None,
         host: str = "localhost",
         port: int = 8000
     ):
@@ -37,6 +38,7 @@ class WebSocketBridge:
         self.on_audio = on_audio
         self._on_commit = on_commit
         self._on_recording_start = on_recording_start
+        self._on_mail_confirmation = on_mail_confirmation
         
         self.clients: set = set()
         self.server: Optional[websockets.Server] = None
@@ -207,9 +209,17 @@ class WebSocketBridge:
                 await self._handle_toggle_recording()
             elif msg_type == "audio_chunk":
                 await self._handle_audio_chunk(data)
+            elif msg_type == "confirm_mail_draft":
+                await self._handle_mail_confirmation(data)
 
         except Exception as e:
             print(f"Error handling message: {e}")
+
+    async def _handle_mail_confirmation(self, data: dict[str, Any]) -> None:
+        if not self._on_mail_confirmation:
+            return
+
+        self._on_mail_confirmation(data)
             
     async def _process_recorded_audio(self):
         """Commit audio buffer and create response."""
@@ -273,6 +283,18 @@ class WebSocketBridge:
             "state": state,
             "message": message,
         })
+
+    def send_mail_draft(self, draft: dict[str, Any]):
+        """Send a structured mail draft preview to the frontend."""
+        payload = {
+            "type": "mail_draft",
+            "account": draft.get("account", "gmail"),
+            "to": draft.get("to", ""),
+            "subject": draft.get("subject", ""),
+            "body": draft.get("body", ""),
+            "rawText": draft.get("rawText", ""),
+        }
+        self._broadcast_event(payload)
         
     def set_recording_state(self, is_recording: bool):
         """Update recording state."""

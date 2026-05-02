@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import type { BackendMessage, ConnectionState, Message } from '../types'
+import type { BackendMessage, ConnectionState, Message, BackendMailDraftMessage } from '../types'
 
 interface WebSocketState {
   connectionState: ConnectionState
@@ -7,6 +7,7 @@ interface WebSocketState {
   messages: Message[]
   isRecording: boolean
   isSpeaking: boolean
+  pendingMailDraft: BackendMailDraftMessage | null
 }
 
 function isBackendMessage(data: unknown): data is BackendMessage {
@@ -28,6 +29,12 @@ function isBackendMessage(data: unknown): data is BackendMessage {
       return typeof payload.isRecording === 'boolean'
     case 'speaking':
       return typeof payload.isSpeaking === 'boolean'
+    case 'mail_draft':
+      return typeof payload.account === 'string'
+        && typeof payload.to === 'string'
+        && typeof payload.subject === 'string'
+        && typeof payload.body === 'string'
+        && typeof payload.rawText === 'string'
     default:
       return false
   }
@@ -39,7 +46,8 @@ export function useWebSocket(url: string) {
     statusMessage: 'Connecting to JARVIS...',
     messages: [],
     isRecording: false,
-    isSpeaking: false
+    isSpeaking: false,
+    pendingMailDraft: null
   })
 
   const wsRef = useRef<WebSocket | null>(null)
@@ -202,6 +210,13 @@ export function useWebSocket(url: string) {
             isSpeaking: parsed.isSpeaking
           }))
           console.log('🔊 JARVIS speaking:', parsed.isSpeaking)
+          break
+
+        case 'mail_draft':
+          setState(prev => ({
+            ...prev,
+            pendingMailDraft: parsed
+          }))
           break
       }
     }

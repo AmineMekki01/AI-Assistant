@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -44,6 +45,14 @@ class FakeProcess:
     async def wait(self):
         self.wait_called = True
         return 0
+
+
+class FakeSessionSocket:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, message):
+        self.sent.append(message)
 
 
 @pytest.mark.asyncio
@@ -126,3 +135,19 @@ async def test_extract_and_maybe_store_memory_routes_candidates(monkeypatch):
 
     await session._extract_and_maybe_store_memory("I like tea")
     assert stored == [("User is Amine", "identity")]
+
+
+@pytest.mark.asyncio
+async def test_send_user_text_emits_user_message_and_response(monkeypatch):
+    monkeypatch.setattr(rs, "load_all_capabilities", lambda: None)
+    session = rs.RealtimeSession()
+    session.ws = FakeSessionSocket()
+    session._ws_alive = lambda: True
+
+    await session.send_user_text("yes")
+
+    payloads = [json.loads(message) for message in session.ws.sent]
+    assert payloads[0]["type"] == "conversation.item.create"
+    assert payloads[0]["item"]["role"] == "user"
+    assert payloads[0]["item"]["content"][0]["text"] == "yes"
+    assert payloads[1] == {"type": "response.create"}

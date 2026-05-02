@@ -6,9 +6,11 @@ import asyncio
 import base64
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
+import textwrap
 from typing import Any, AsyncIterator, Callable, Optional
 
 import httpx
@@ -250,9 +252,10 @@ for detail.
 
 ── Tool-usage policy ────────────────────────────────────────────
   • Mail: ALWAYS use `mail_list` / `mail_search` (they fan out across Gmail and Zimbra).
-    For sending, call `mail_send` first WITHOUT `confirmed` - you will receive a DRAFT
-    preview. Read the draft aloud, ask "Shall I send it?", and only after the user
-    clearly says yes call `mail_send` again with `confirmed: true`.
+    For ANY request to compose, draft, write, or send an email, call `mail_send` first
+    WITHOUT `confirmed` - you will receive a DRAFT preview. Do NOT freeform-compose the
+    email in your own reply. Read the preview aloud, ask "Shall I send it?", and only
+    after the user clearly says yes call `mail_send` again with `confirmed: true`.
   • Calendar: ALWAYS use `calendar_list` (fans out over Google + Apple Calendar -
     iCloud, Holidays, Birthdays, Fêtes and subscribed calendars only exist on Apple).
     For creating events, use `calendar_create` with the same preview-then-confirm
@@ -310,7 +313,36 @@ for detail.
 
 Always respond in English, regardless of what language the user speaks.
 """
+
     return persona
+
+
+def _parse_mail_draft_preview(output: str) -> dict[str, Any] | None:
+    """Parse the structured draft preview returned by mail_send."""
+    if not output.startswith("DRAFT (not sent yet - ask the user to confirm):"):
+        return None
+
+    pattern = re.compile(
+        r"^DRAFT \(not sent yet - ask the user to confirm\):\n"
+        r"\s+Account:\s*(?P<account>gmail|zimbra)\n"
+        r"\s+To:\s*(?P<to>.+)\n"
+        r"\s+Subject:\s*(?P<subject>.+)\n"
+        r"\s+Body:\n"
+        r"(?P<body>[\s\S]*?)(?:\n\nRead this draft back|\Z)",
+        re.IGNORECASE,
+    )
+    match = pattern.match(output)
+    if not match:
+        return None
+
+    body = textwrap.dedent(match.group("body")).rstrip()
+    return {
+        "account": match.group("account").lower(),
+        "to": match.group("to").strip(),
+        "subject": match.group("subject").strip(),
+        "body": body,
+        "rawText": output,
+    }
 
 
 class RealtimeSession:
@@ -319,7 +351,8 @@ class RealtimeSession:
     def __init__(self, on_transcript: Optional[Callable[[str, str], None]] = None,
                  on_audio: Optional[Callable[[bytes], None]] = None,
                  on_status: Optional[Callable[[str, str], None]] = None,
-                 on_speaking: Optional[Callable[[bool], None]] = None):
+                 on_speaking: Optional[Callable[[bool], None]] = None,
+                 on_mail_draft: Optional[Callable[[dict[str, Any]], None]] = None):
         self.api_key = os.getenv("OPENAI_API_KEY", "")
         self.ws: Optional[ClientConnection] = None
         self._pump_task: Optional[asyncio.Task] = None
@@ -327,6 +360,7 @@ class RealtimeSession:
         self.on_audio = on_audio
         self.on_status = on_status
         self.on_speaking = on_speaking
+        self.on_mail_draft = on_mail_draft
         load_all_capabilities()
         self.tools = REGISTRY.as_openai_tool_list()
         self._reconnect_lock: Optional[asyncio.Lock] = None
@@ -765,6 +799,14 @@ class RealtimeSession:
             output = f"Error: {error_msg}"
             log.error("X TOOL_CALL_FAILED", name=name, error=error_msg)
 
+        if name == "mail_send" and result.get("ok"):
+            draft = _parse_mail_draft_preview(output)
+            if draft and self.on_mail_draft:
+                try:
+                    self.on_mail_draft(draft)
+                except Exception as e:
+                    log.debug("mail_draft_callback_failed", error=str(e))
+
         if name == "delegate_to_briefing" and result.get("ok") and sys.platform == "darwin" and shutil.which("say"):
             await self._speak_direct_text(output)
             log.info("tool_result", name=name, result=output[:200])
@@ -885,6 +927,27 @@ class RealtimeSession:
                     await self.ws.send(json.dumps(event))
                 except Exception as e2:
                     log.error(f"X send_event retry failed: {e2}")
+
+    async def send_user_text(self, text: str) -> None:
+        """Inject a user text turn into the Realtime conversation."""
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return
+
+        await self.send_event({
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": cleaned,
+                    }
+                ],
+            },
+        })
+        await self.send_event({"type": "response.create"})
     
     async def append_audio(self, pcm16_bytes: bytes) -> None:
         """Send audio data to OpenAI."""
