@@ -353,15 +353,20 @@ async def test_main_app_session_wiring_and_shutdown(monkeypatch):
     app._on_transcript("assistant", "Hello there")
     app._on_status("ready", "Online")
     app._on_speaking(True)
+    assert app._native_mic_resume_at == float("inf")
 
     app._on_audio(b"abc")
     assert created_sessions[0].appended_audio == []
 
     bridge.is_speaking = False
+    previous_speaking_calls = len(bridge.speaking_calls)
+    app._on_audio(b"outgoing-bytes")
+    assert len(bridge.speaking_calls) == previous_speaking_calls + 1
+    assert bridge.speaking_calls[-1] is True
+    assert app._native_mic_resume_at == float("inf")
+
     app._on_input_audio(b"abc")
     assert created_sessions[0].appended_audio == [b"abc"]
-
-    app._on_audio(b"outgoing-bytes")
     assert app.audio_queue.qsize() >= 1
 
     app._on_commit_audio()
@@ -376,7 +381,45 @@ async def test_main_app_session_wiring_and_shutdown(monkeypatch):
     assert bridge.speaking_calls[-1] is False
     assert app._speaking_timer is None
 
+    app._on_speaking(False)
+    assert app._native_mic_resume_at > 0
+
     app.stop()
     assert bridge.stop_called is True
     assert created_sessions[0].close_called is True
     assert future_calls
+
+
+def test_main_music_playing_gate_blocks_microphone(monkeypatch):
+    main = importlib.import_module("main")
+
+    calls = []
+
+    def fake_is_music_playing():
+        calls.append(True)
+        return True
+
+    monkeypatch.setattr(main, "is_music_playing", fake_is_music_playing)
+
+    app = main.JarvisWebSocketApp()
+    app._native_voice_armed = True
+    app._recording_audio_buffer = [b"old"]
+    app._audio_chunk_count = 4
+    app._total_audio_sent = 128
+
+    bridge = SimpleNamespace(is_recording=False, set_recording_state=lambda flag: None, is_speaking=False)
+    app.bridge = bridge
+
+    assert main.is_music_playing() is True
+    if main.is_music_playing():
+        app._recording_audio_buffer = []
+        app._audio_chunk_count = 0
+        app._total_audio_sent = 0
+        app.bridge.set_recording_state(False)
+        app._native_voice_armed = False
+
+    assert calls
+    assert app._native_voice_armed is False
+    assert app._recording_audio_buffer == []
+    assert app._audio_chunk_count == 0
+    assert app._total_audio_sent == 0

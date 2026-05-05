@@ -41,6 +41,28 @@ class Settings:
             except Exception:
                 pass
         return {}
+
+    @property
+    def voice_settings(self) -> dict:
+        """Load voice wake-word settings from saved settings."""
+        settings_path = Path.home() / ".jarvis" / "settings.json"
+        if settings_path.exists():
+            try:
+                with open(settings_path) as f:
+                    settings = json.load(f)
+                    voice = settings.get("voice", {})
+                    return {
+                        "enabled": bool(voice.get("enabled", True)),
+                        "wakeWord": voice.get("wakeWord", "Hey JARVIS"),
+                        "sensitivity": float(voice.get("sensitivity", 0.5)),
+                    }
+            except Exception:
+                pass
+        return {
+            "enabled": True,
+            "wakeWord": "Hey JARVIS",
+            "sensitivity": 0.5,
+        }
     
     @property
     def google_enabled(self) -> bool:

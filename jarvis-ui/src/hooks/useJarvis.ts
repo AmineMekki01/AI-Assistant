@@ -2,6 +2,43 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useWebSocket } from './useWebSocket'
 import { useAudio } from './useAudio'
 import type { JarvisState, JarvisActions, SystemMetrics, MailDraft } from '../types'
+import type { Settings } from './useSettings'
+
+interface VoiceSettings {
+  enabled: boolean
+  wakeWord: string
+  sensitivity: number
+}
+
+const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
+  enabled: true,
+  wakeWord: 'Hey JARVIS',
+  sensitivity: 0.5
+}
+
+function readVoiceSettingsFromStorage(): VoiceSettings {
+  if (typeof window === 'undefined') {
+    return DEFAULT_VOICE_SETTINGS
+  }
+
+  try {
+    const stored = localStorage.getItem('jarvis_settings')
+    if (!stored) {
+      return DEFAULT_VOICE_SETTINGS
+    }
+
+    const parsed = JSON.parse(stored) as { voice?: Partial<VoiceSettings> }
+    const voice = parsed.voice ?? {}
+
+    return {
+      enabled: typeof voice.enabled === 'boolean' ? voice.enabled : DEFAULT_VOICE_SETTINGS.enabled,
+      wakeWord: typeof voice.wakeWord === 'string' && voice.wakeWord.trim() ? voice.wakeWord.trim() : DEFAULT_VOICE_SETTINGS.wakeWord,
+      sensitivity: typeof voice.sensitivity === 'number' ? voice.sensitivity : DEFAULT_VOICE_SETTINGS.sensitivity
+    }
+  } catch {
+    return DEFAULT_VOICE_SETTINGS
+  }
+}
 
 function inferRecipientFromTranscript(text: string): string {
   const emailMatch = text.match(/\b([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/)
@@ -68,10 +105,13 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
   const [uiRecording, setUiRecording] = useState(false)
   const [systemMetrics, setSystemMetrics] = useState<SystemMetrics | null>(null)
   const [pendingMailDraft, setPendingMailDraft] = useState<MailDraft | null>(null)
+  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(readVoiceSettingsFromStorage)
+  const [isWakeListening, setIsWakeListening] = useState(false)
 
   const isRecordingRef = useRef(false)
   const isSpeakingRef = useRef(false)
   const dismissedMailDraftRef = useRef<string | null>(null)
+  const voiceSettingsRef = useRef<VoiceSettings>(voiceSettings)
 
   const {
     connectionState,
@@ -107,6 +147,32 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
   useEffect(() => {
     isSpeakingRef.current = isSpeaking
   }, [isSpeaking])
+
+  useEffect(() => {
+    voiceSettingsRef.current = voiceSettings
+  }, [voiceSettings])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    const handleSettingsUpdate = (event: Event) => {
+      const detail = (event as CustomEvent<Settings>).detail
+      if (!detail?.voice) {
+        return
+      }
+
+      setVoiceSettings(prev => ({
+        enabled: typeof detail.voice.enabled === 'boolean' ? detail.voice.enabled : prev.enabled,
+        wakeWord: typeof detail.voice.wakeWord === 'string' && detail.voice.wakeWord.trim() ? detail.voice.wakeWord.trim() : prev.wakeWord,
+        sensitivity: typeof detail.voice.sensitivity === 'number' ? detail.voice.sensitivity : prev.sensitivity
+      }))
+    }
+
+    window.addEventListener('jarvis-settings-updated', handleSettingsUpdate as EventListener)
+    return () => window.removeEventListener('jarvis-settings-updated', handleSettingsUpdate as EventListener)
+  }, [])
 
   useEffect(() => {
     if (wsIsRecording !== isRecordingRef.current) {
@@ -237,6 +303,12 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
     toggleRecording()
   }, [startRecording, stopRecording, toggleRecording])
 
+  useEffect(() => {
+    const wakeStatus = statusMessage.toLowerCase()
+    const listening = wakeStatus.includes('wake word armed') || wakeStatus.includes('wake word detected') || wakeStatus.includes('listening for your request')
+    setIsWakeListening(listening)
+  }, [statusMessage])
+
   const state: JarvisState = useMemo(() => ({
     connectionState,
     statusMessage,
@@ -246,8 +318,10 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
     audioLevel,
     currentTime,
     systemMetrics,
-    pendingMailDraft
-  }), [connectionState, statusMessage, messages, uiRecording, isSpeaking, audioLevel, currentTime, systemMetrics, pendingMailDraft])
+    pendingMailDraft,
+    isWakeListening,
+    wakeWord: voiceSettings.wakeWord
+  }), [connectionState, statusMessage, messages, uiRecording, isSpeaking, audioLevel, currentTime, systemMetrics, pendingMailDraft, isWakeListening, voiceSettings.wakeWord])
 
   const actions: JarvisActions = useMemo(() => ({
     toggleRecording: handleToggleRecording,
