@@ -153,6 +153,12 @@ export function useSettings() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings)
     }).catch(() => {})
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('jarvis-settings-updated', {
+        detail: settings
+      }))
+    }
   }, [settings])
 
   const updateQdrant = useCallback((config: Partial<QdrantConfig>) => {

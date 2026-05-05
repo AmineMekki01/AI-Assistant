@@ -72,6 +72,8 @@ export interface JarvisState {
   currentTime: Date
   systemMetrics: SystemMetrics | null
   pendingMailDraft: MailDraft | null
+  isWakeListening: boolean
+  wakeWord: string
 }
 
 export interface JarvisActions {

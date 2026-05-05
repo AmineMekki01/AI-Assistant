@@ -6,6 +6,8 @@ import type { Message } from '../../types'
 interface FooterProps {
   isSpeaking: boolean
   isRecording: boolean
+  isWakeListening: boolean
+  wakeWord: string
   latestMessage?: Message
   onToggleRecording: () => void
   onOpenSettings: () => void
@@ -14,6 +16,8 @@ interface FooterProps {
 export function Footer({
   isSpeaking,
   isRecording,
+  isWakeListening,
+  wakeWord,
   latestMessage,
   onToggleRecording,
   onOpenSettings
@@ -67,10 +71,14 @@ export function Footer({
 
         <div className="control-hints">
           <span className="hint-main">
-            {isRecording ? 'Recording... Click to stop' : 'Click to start recording'}
+            {isRecording ? 'Recording... Click to stop' : 'Say “Hey JARVIS” to begin'}
           </span>
           <span className="hint-sub">
-            {isSpeaking ? 'JARVIS is speaking' : 'Voice-controlled AI assistant'}
+            {isSpeaking
+              ? 'JARVIS is speaking'
+              : isWakeListening
+                ? `Wake word armed — say “${wakeWord}”`
+                : 'Voice-controlled AI assistant'}
           </span>
         </div>
 
