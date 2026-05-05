@@ -335,7 +335,13 @@ async def test_dashboard_health_aggregates_cached_statuses(temp_home, monkeypatc
     jarvis_dir = temp_home / ".jarvis"
     jarvis_dir.mkdir(parents=True, exist_ok=True)
 
-    (jarvis_dir / "qdrant_status.json").write_text(json.dumps({"connected": True, "collectionExists": True}))
+    (jarvis_dir / "qdrant_status.json").write_text(json.dumps({
+        "connected": True,
+        "collectionExists": True,
+        "host": "localhost",
+        "port": 6333,
+        "collectionName": "jarvis_knowledge",
+    }))
     (jarvis_dir / "obsidian_status.json").write_text(json.dumps({"synced": True, "lastSync": 123.0, "fileCount": 5}))
     (jarvis_dir / "zimbra_status.json").write_text(json.dumps({"configured": True, "ok": True, "lastTested": 456.0}))
     (jarvis_dir / "apple_calendar_status.json").write_text(json.dumps({"enabled": True, "available": True, "ok": True, "lastTested": 789.0}))
@@ -345,6 +351,7 @@ async def test_dashboard_health_aggregates_cached_statuses(temp_home, monkeypatc
     monkeypatch.setattr(health.Path, "home", lambda: temp_home)
     monkeypatch.setattr(google_auth_module, "token_path", lambda: token_file)
     monkeypatch.setattr(google_auth_module, "load_google_credentials", lambda path, repair=False: (SimpleNamespace(), False))
+    _install_fake_qdrant_modules(monkeypatch, FakeQdrantClient)
 
     response = await health.handle_dashboard_health(FakeRequest())
     payload = json.loads(response.text)

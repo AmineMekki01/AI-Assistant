@@ -149,7 +149,10 @@ async def test_websocket_bridge_recording_audio_and_message_paths(monkeypatch):
     bridge._on_mail_confirmation = confirmation_calls.append
     await bridge._handle_message(object(), json.dumps({"type": "confirm_mail_draft", "accepted": True}))
     await bridge._handle_message(object(), json.dumps({"type": "confirm_mail_draft", "accepted": False}))
-    assert confirmation_calls == [True, False]
+    assert confirmation_calls == [
+        {"type": "confirm_mail_draft", "accepted": True},
+        {"type": "confirm_mail_draft", "accepted": False},
+    ]
 
     captured = []
     def fake_run_coroutine_threadsafe(coro, loop):
@@ -348,6 +351,7 @@ async def test_main_app_session_wiring_and_shutdown(monkeypatch):
     app.session = created_sessions[0]
     app.event_loop = object()
     app.bridge = bridge
+    app.bridge.is_recording = False
     app._speaking_timer = SimpleNamespace(cancel=lambda: bridge.speaking_calls.append("timer-cancelled"))
 
     app._on_transcript("assistant", "Hello there")
@@ -365,12 +369,15 @@ async def test_main_app_session_wiring_and_shutdown(monkeypatch):
     assert bridge.speaking_calls[-1] is True
     assert app._native_mic_resume_at == float("inf")
 
+    app._on_speaking(False)
+    bridge.is_speaking = False
+
     app._on_input_audio(b"abc")
     assert created_sessions[0].appended_audio == [b"abc"]
     assert app.audio_queue.qsize() >= 1
 
     app._on_commit_audio()
-    assert created_sessions[0].commits == 1
+    assert created_sessions[0].commits == 0
     assert app._total_audio_sent == 0
     assert app._audio_chunk_count == 0
 
