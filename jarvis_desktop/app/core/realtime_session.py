@@ -299,6 +299,13 @@ for detail.
       Do not replace it with "That’s your daily briefing" or any shorter
       paraphrase, and do not add a follow-up question unless the briefing itself
       explicitly requires one.
+      Only use this tool when the user has clearly asked for a briefing or catch-
+      up. Do NOT use it for vague partial utterances such as "latest information
+      about..." or unfinished fragments that do not name a specific subject.
+      If the utterance sounds incomplete or could just as easily be a general
+      research query, ask a clarifying question instead of delegating. If the
+      user is asking about a specific topic or current facts outside their own
+      calendar/mail context, prefer `delegate_to_research` instead.
     - `delegate_to_workspace` - multi-step triage across mail/calendar/notes.
       Example triggers: "what do I have this week and what should I prep",
       "summarise unread emails that need action", "anything conflicting with
@@ -806,11 +813,6 @@ class RealtimeSession:
                     self.on_mail_draft(draft)
                 except Exception as e:
                     log.debug("mail_draft_callback_failed", error=str(e))
-
-        if name == "delegate_to_briefing" and result.get("ok") and sys.platform == "darwin" and shutil.which("say"):
-            await self._speak_direct_text(output)
-            log.info("tool_result", name=name, result=output[:200])
-            return
 
         await self.send_event({
             "type": "conversation.item.create",

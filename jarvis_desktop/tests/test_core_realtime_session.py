@@ -69,6 +69,8 @@ async def test_build_session_config_uses_configured_voice(monkeypatch):
     assert payload["type"] == "session.update"
     assert payload["session"]["voice"] == "onyx"
     assert "delegate_to_briefing" in payload["session"]["instructions"]
+    assert "latest information" in payload["session"]["instructions"]
+    assert "ask a clarifying question instead of delegating" in payload["session"]["instructions"]
 
 
 @pytest.mark.asyncio
@@ -103,6 +105,47 @@ async def test_speak_direct_text_uses_openai_tts_voice(monkeypatch):
     assert speaking[-1] is False
     assert fake_process.wait_called is True
     assert FakeAsyncClient.last_instance.calls[0]["json"]["voice"] == "onyx"
+
+
+@pytest.mark.asyncio
+async def test_delegate_to_briefing_uses_normal_realtime_pipeline(monkeypatch):
+    monkeypatch.setattr(rs, "load_all_capabilities", lambda: None)
+
+    session = rs.RealtimeSession()
+    session.ws = FakeSessionSocket()
+    session._ws_alive = lambda: True
+
+    spoke = []
+
+    async def fail_if_direct_tts(text: str) -> None:
+        spoke.append(text)
+
+    monkeypatch.setattr(session, "_speak_direct_text", fail_if_direct_tts)
+
+    async def fake_call(name, args):
+        return {"ok": True, "result": "It’s a quiet day with no events."}
+
+    monkeypatch.setattr(rs.REGISTRY, "call", fake_call)
+    monkeypatch.setattr(rs.REGISTRY, "kind_of", lambda name: "agent")
+
+    await session._handle_tool_call({
+        "type": "response.function_call_arguments.done",
+        "call_id": "call_123",
+        "name": "delegate_to_briefing",
+        "arguments": "{}",
+    })
+
+    payloads = [json.loads(message) for message in session.ws.sent]
+    assert spoke == []
+    assert payloads[0] == {
+        "type": "conversation.item.create",
+        "item": {
+            "type": "function_call_output",
+            "call_id": "call_123",
+            "output": "It’s a quiet day with no events.",
+        },
+    }
+    assert payloads[1] == {"type": "response.create"}
 
 
 @pytest.mark.asyncio
