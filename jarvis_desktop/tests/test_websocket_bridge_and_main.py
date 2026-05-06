@@ -430,3 +430,11 @@ def test_main_music_playing_gate_blocks_microphone(monkeypatch):
     assert app._recording_audio_buffer == []
     assert app._audio_chunk_count == 0
     assert app._total_audio_sent == 0
+
+
+def test_native_silence_timeout_adapts_to_longer_speech():
+    main = importlib.import_module("main")
+
+    assert main.JarvisWebSocketApp._native_silence_timeout(0.4) == 1.2
+    assert main.JarvisWebSocketApp._native_silence_timeout(2.0) == 1.8
+    assert main.JarvisWebSocketApp._native_silence_timeout(5.0) == 2.1

@@ -95,6 +95,20 @@ class JarvisWebSocketApp:
         missing = [name for name in required if importlib.util.find_spec(name) is None]
         return missing
 
+    @staticmethod
+    def _native_silence_timeout(recording_duration: float) -> float:
+        """Return an adaptive end-of-speech timeout.
+
+        Short commands still commit quickly, but longer utterances get more
+        time so slower speakers and mid-sentence pauses are less likely to be
+        cut off.
+        """
+        if recording_duration < 1.5:
+            return 1.2
+        if recording_duration < 4.0:
+            return 1.8
+        return 2.1
+
     def _set_voice_status(self, state: str, message: str) -> None:
         status_key = f"{state}:{message}"
         if status_key == self._native_voice_last_status:
@@ -190,8 +204,7 @@ class JarvisWebSocketApp:
         speech_threshold_multiplier = 3.5
         speech_start_threshold_floor = 0.008
         speech_start_threshold_multiplier = 5.0
-        silence_timeout = 1.2
-        min_recording_duration = 0.5
+        min_recording_duration = 0.65
         listen_window_seconds = 300.0  # 5 minutes follow-up window
         speech_frames_required = 3
 
@@ -371,6 +384,7 @@ class JarvisWebSocketApp:
                         self._on_input_audio(raw_audio)
 
                     recording_duration = time.time() - self._native_recording_started_at
+                    silence_timeout = self._native_silence_timeout(recording_duration)
                     silence_duration = time.time() - self._native_voice_last_activity
 
                     if recording_duration >= min_recording_duration and silence_duration >= silence_timeout:
