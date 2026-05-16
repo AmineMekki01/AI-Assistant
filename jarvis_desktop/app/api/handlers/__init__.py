@@ -19,6 +19,11 @@ from .storage import (
     _index_to_qdrant
 )
 from .settings import handle_save_settings, handle_load_settings
+from .speaker import (
+    handle_speaker_profile_status,
+    handle_speaker_profile_enroll,
+    handle_speaker_profile_clear,
+)
 
 __all__ = [
     "handle_health",
@@ -40,4 +45,7 @@ __all__ = [
     "_index_to_qdrant",
     "handle_save_settings",
     "handle_load_settings",
+    "handle_speaker_profile_status",
+    "handle_speaker_profile_enroll",
+    "handle_speaker_profile_clear",
 ]

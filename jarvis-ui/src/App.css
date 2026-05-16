@@ -223,6 +223,9 @@
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.05);
 }
+.status-item-voice {
+  gap: 8px;
+}
 .status-label {
   display: flex;
   align-items: center;
@@ -246,6 +249,32 @@
 .status-value.active {
   color: var(--color-cyan);
   text-shadow: 0 0 10px var(--color-cyan-glow);
+}
+.voice-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.voice-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--color-text-muted);
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.voice-chip.active {
+  border-color: rgba(0, 240, 255, 0.35);
+  background: rgba(0, 240, 255, 0.08);
+  color: var(--color-cyan);
+}
+.status-note.compact {
+  line-height: 1.4;
 }
 .mail-draft-overlay {
   position: fixed;

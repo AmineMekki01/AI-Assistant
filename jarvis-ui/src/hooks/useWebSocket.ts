@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import type { BackendMessage, ConnectionState, Message, BackendMailDraftMessage } from '../types'
+import type { BackendMessage, ConnectionState, Message, BackendMailDraftMessage, VoiceDebugState } from '../types'
 
 interface WebSocketState {
   connectionState: ConnectionState
@@ -7,6 +7,7 @@ interface WebSocketState {
   messages: Message[]
   isRecording: boolean
   isSpeaking: boolean
+  voiceDebug: VoiceDebugState | null
   pendingMailDraft: BackendMailDraftMessage | null
 }
 
@@ -29,6 +30,17 @@ function isBackendMessage(data: unknown): data is BackendMessage {
       return typeof payload.isRecording === 'boolean'
     case 'speaking':
       return typeof payload.isSpeaking === 'boolean'
+    case 'voice_debug':
+      return typeof payload.armed === 'boolean'
+        && typeof payload.speaking === 'boolean'
+        && typeof payload.musicPlaying === 'boolean'
+        && typeof payload.passiveFollowup === 'boolean'
+        && typeof payload.recording === 'boolean'
+        && typeof payload.skipReason === 'string'
+        && typeof payload.cooldownRemaining === 'number'
+        && typeof payload.micResumeRemaining === 'number'
+        && typeof payload.listenWindowRemaining === 'number'
+        && typeof payload.status === 'string'
     case 'mail_draft':
       return typeof payload.account === 'string'
         && typeof payload.to === 'string'
@@ -40,6 +52,34 @@ function isBackendMessage(data: unknown): data is BackendMessage {
   }
 }
 
+function describeIncomingPayload(payload: unknown): string {
+  if (typeof payload === 'string') {
+    return payload.length > 160 ? `${payload.slice(0, 160)}…` : payload
+  }
+
+  if (payload instanceof Blob) {
+    return `[Blob size=${payload.size} type=${payload.type || 'unknown'}]`
+  }
+
+  if (payload instanceof ArrayBuffer) {
+    return `[ArrayBuffer byteLength=${payload.byteLength}]`
+  }
+
+  if (ArrayBuffer.isView(payload)) {
+    return `[${payload.constructor.name} byteLength=${payload.byteLength}]`
+  }
+
+  if (payload && typeof payload === 'object') {
+    try {
+      return JSON.stringify(payload)
+    } catch {
+      return '[Unserializable object]'
+    }
+  }
+
+  return String(payload)
+}
+
 export function useWebSocket(url: string) {
   const [state, setState] = useState<WebSocketState>({
     connectionState: 'connecting',
@@ -47,6 +87,7 @@ export function useWebSocket(url: string) {
     messages: [],
     isRecording: false,
     isSpeaking: false,
+    voiceDebug: null,
     pendingMailDraft: null
   })
 
@@ -147,32 +188,42 @@ export function useWebSocket(url: string) {
       }))
     }
 
-    ws.onmessage = (event) => {
-      let parsed: unknown
+    ws.onmessage = async (event) => {
+      const raw = event.data as unknown
+      let incoming: unknown = raw
+
       try {
-        parsed = JSON.parse(event.data)
+        if (typeof raw === 'string') {
+          incoming = JSON.parse(raw)
+        } else if (raw instanceof Blob) {
+          incoming = JSON.parse(await raw.text())
+        } else if (raw instanceof ArrayBuffer) {
+          incoming = JSON.parse(new TextDecoder().decode(raw))
+        } else if (ArrayBuffer.isView(raw)) {
+          incoming = JSON.parse(new TextDecoder().decode(raw.buffer))
+        }
       } catch {
-        console.warn('Ignoring malformed backend message')
+        console.warn('Ignoring malformed backend message', describeIncomingPayload(raw))
         return
       }
 
-      if (!isBackendMessage(parsed)) {
-        console.warn('Ignoring unknown backend message shape', parsed)
+      if (!isBackendMessage(incoming)) {
+        console.warn('Ignoring unknown backend message shape', describeIncomingPayload(incoming))
         return
       }
 
-      switch (parsed.type) {
+      switch (incoming.type) {
         case 'message':
           setState(prev => {
             const lastMsg = prev.messages[prev.messages.length - 1]
-            if (lastMsg && lastMsg.role === parsed.role && parsed.role === 'assistant') {
+            if (lastMsg && lastMsg.role === incoming.role && incoming.role === 'assistant') {
               return {
                 ...prev,
                 messages: [
                   ...prev.messages.slice(0, -1),
                   {
-                    role: parsed.role,
-                    text: parsed.text,
+                    role: incoming.role,
+                    text: incoming.text,
                     timestamp: lastMsg.timestamp
                   }
                 ]
@@ -181,8 +232,8 @@ export function useWebSocket(url: string) {
             return {
               ...prev,
               messages: [...prev.messages, {
-                role: parsed.role,
-                text: parsed.text,
+                role: incoming.role,
+                text: incoming.text,
                 timestamp: new Date()
               }]
             }
@@ -192,30 +243,49 @@ export function useWebSocket(url: string) {
         case 'status':
           setState(prev => ({
             ...prev,
-            connectionState: parsed.state,
-            statusMessage: parsed.message
+            connectionState: incoming.state,
+            statusMessage: incoming.message
           }))
           break
 
         case 'recording':
           setState(prev => ({
             ...prev,
-            isRecording: parsed.isRecording
+            isRecording: incoming.isRecording
           }))
           break
           
         case 'speaking':
           setState(prev => ({
             ...prev,
-            isSpeaking: parsed.isSpeaking
+            isSpeaking: incoming.isSpeaking
           }))
-          console.log('🔊 JARVIS speaking:', parsed.isSpeaking)
+          console.log('🔊 JARVIS speaking:', incoming.isSpeaking)
+          break
+
+        case 'voice_debug':
+          console.log(
+            '🫀 Voice debug:',
+            incoming.status,
+            `armed=${incoming.armed}`,
+            `speaking=${incoming.speaking}`,
+            `music=${incoming.musicPlaying}`,
+            `passive=${incoming.passiveFollowup}`,
+            `skip=${incoming.skipReason || 'none'}`,
+            `cooldown=${incoming.cooldownRemaining.toFixed(1)}s`,
+            `mic=${incoming.micResumeRemaining.toFixed(1)}s`,
+            `window=${incoming.listenWindowRemaining.toFixed(1)}s`
+          )
+          setState(prev => ({
+            ...prev,
+            voiceDebug: incoming
+          }))
           break
 
         case 'mail_draft':
           setState(prev => ({
             ...prev,
-            pendingMailDraft: parsed
+            pendingMailDraft: incoming
           }))
           break
       }

@@ -6,12 +6,29 @@ from functools import lru_cache
 from pathlib import Path
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
 class Settings:
     """Application settings loaded from environment variables."""
     
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_realtime_model: str = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-mini")
-    openai_realtime_voice: str = os.getenv("OPENAI_REALTIME_VOICE", "alloy")
+    openai_realtime_voice: str = os.getenv("OPENAI_REALTIME_VOICE", "onyx")
     openai_utility_model: str = os.getenv("OPENAI_UTILITY_MODEL", "gpt-5.4-nano")
     openai_embedding_model: str = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
     
@@ -28,7 +45,16 @@ class Settings:
     qdrant_vault_collection: str = os.getenv("QDRANT_VAULT_COLLECTION", "obsidian_vault")
     
     jarvis_user_id: str = os.getenv("JARVIS_USER_ID", "user")
-    
+    speaker_verification_enabled: bool = _env_bool("JARVIS_SPEAKER_VERIFICATION_ENABLED", False)
+    speaker_verification_threshold: float = _env_float("JARVIS_SPEAKER_VERIFICATION_THRESHOLD", 0.35)
+    speaker_verification_model_name: str = os.getenv(
+        "SPEECHBRAIN_MODEL_NAME",
+        os.getenv("JARVIS_SPEAKER_VERIFICATION_MODEL_NAME", "speechbrain/spkrec-ecapa-voxceleb"),
+    )
+    speaker_profile_path: str = os.path.expanduser(
+        os.getenv("JARVIS_SPEAKER_PROFILE_PATH", "~/.jarvis/voice/speaker_profile.json")
+    )
+
     @property
     def personal_info(self) -> dict:
         """Load personal info from saved settings."""

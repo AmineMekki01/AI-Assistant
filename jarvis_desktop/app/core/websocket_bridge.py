@@ -284,6 +284,23 @@ class WebSocketBridge:
             "message": message,
         })
 
+    def send_voice_debug(self, data: dict[str, Any]) -> None:
+        """Send native voice listener diagnostics to the frontend."""
+        payload = {
+            "type": "voice_debug",
+            "armed": bool(data.get("armed", False)),
+            "speaking": bool(data.get("speaking", False)),
+            "musicPlaying": bool(data.get("musicPlaying", False)),
+            "passiveFollowup": bool(data.get("passiveFollowup", False)),
+            "recording": bool(data.get("recording", False)),
+            "skipReason": str(data.get("skipReason", "")),
+            "cooldownRemaining": float(data.get("cooldownRemaining", 0.0)),
+            "micResumeRemaining": float(data.get("micResumeRemaining", 0.0)),
+            "listenWindowRemaining": float(data.get("listenWindowRemaining", 0.0)),
+            "status": str(data.get("status", "idle")),
+        }
+        self._broadcast_event(payload)
+
     def send_mail_draft(self, draft: dict[str, Any]):
         """Send a structured mail draft preview to the frontend."""
         payload = {

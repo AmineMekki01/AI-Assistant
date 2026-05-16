@@ -7,10 +7,11 @@ from app.core import config as config_module
 
 def test_get_settings_reads_environment_and_caches(monkeypatch):
     monkeypatch.setattr(config_module.Settings, "openai_api_key", "test-key")
-    monkeypatch.setattr(config_module.Settings, "openai_realtime_voice", "onyx")
+    monkeypatch.setattr(config_module.Settings, "openai_realtime_voice", "alloy")
     monkeypatch.setattr(config_module.Settings, "google_client_id", "client-id")
     monkeypatch.setattr(config_module.Settings, "google_client_secret", "client-secret")
     monkeypatch.setattr(config_module.Settings, "qdrant_url", "http://localhost:6333")
+    monkeypatch.setattr(config_module.Settings, "speaker_profile_path", "~/.jarvis/voice/speaker_profile.json")
 
     config_module.get_settings.cache_clear()
     settings_1 = config_module.get_settings()
@@ -18,9 +19,10 @@ def test_get_settings_reads_environment_and_caches(monkeypatch):
 
     assert settings_1 is settings_2
     assert settings_1.openai_api_key == "test-key"
-    assert settings_1.openai_realtime_voice == "onyx"
+    assert settings_1.openai_realtime_voice == "alloy"
     assert settings_1.google_enabled is True
     assert settings_1.qdrant_enabled is True
+    assert settings_1.speaker_profile_path.endswith(".jarvis/voice/speaker_profile.json")
 
     config_module.get_settings.cache_clear()
 

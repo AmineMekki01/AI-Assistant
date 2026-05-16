@@ -17,6 +17,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
+NATIVE_MIC_RESUME_DELAY_SECONDS = 0.2
 
 env_path = SCRIPT_DIR / ".env"
 if env_path.exists():
@@ -56,6 +57,8 @@ class JarvisWebSocketApp:
         self._native_pre_roll_audio: deque[bytes] = deque(maxlen=6)
         self._native_speech_streak = 0
         self._native_voice_last_status = ""
+        self._native_voice_last_skip_reason = ""
+        self._native_voice_last_heartbeat = 0.0
         self.pending_mail_draft = None
         self._recording_audio_buffer = []
         self._audio_chunk_count = 0
@@ -64,6 +67,7 @@ class JarvisWebSocketApp:
         self._last_mail_draft_raw_text = ""
         self._mail_draft_pending = False
         self._pending_voice_texts: queue.Queue[str] = queue.Queue()
+        self._speaker_verifier = None
         
         self.audio_queue = queue.Queue()
         self.audio_thread: threading.Thread = None
@@ -95,6 +99,40 @@ class JarvisWebSocketApp:
         missing = [name for name in required if importlib.util.find_spec(name) is None]
         return missing
 
+    def _get_speaker_verifier(self):
+        if self._speaker_verifier is False:
+            return None
+        if self._speaker_verifier is None:
+            try:
+                from app.core.speaker_verification import SpeakerVerifier
+
+                self._speaker_verifier = SpeakerVerifier.from_environment()
+                if self._speaker_verifier is None:
+                    self._speaker_verifier = False
+            except Exception as e:
+                print(f"⚠️  [VOICE] Speaker verification unavailable: {e}", flush=True)
+                self._speaker_verifier = False
+                return None
+        return self._speaker_verifier
+
+    def _warm_speaker_verifier_cache(self) -> None:
+        verifier = self._get_speaker_verifier()
+        if verifier is None:
+            return
+
+        try:
+            warmed = verifier.preload()
+            if warmed:
+                print(f"✅ [VOICE] Speaker profile warmed in memory: {verifier.profile_path}", flush=True)
+            else:
+                print(f"ℹ️  [VOICE] No speaker profile to warm at {verifier.profile_path}", flush=True)
+        except Exception as e:
+            print(f"⚠️  [VOICE] Speaker warmup failed: {e}", flush=True)
+
+    def _start_speaker_verifier_warmup(self) -> None:
+        thread = threading.Thread(target=self._warm_speaker_verifier_cache, daemon=True)
+        thread.start()
+
     @staticmethod
     def _native_silence_timeout(recording_duration: float) -> float:
         """Return an adaptive end-of-speech timeout.
@@ -116,6 +154,62 @@ class JarvisWebSocketApp:
         self._native_voice_last_status = status_key
         if self.bridge:
             self.bridge.send_status(state, message)
+
+    def _trace_native_voice_skip(self, reason: str) -> None:
+        if reason == self._native_voice_last_skip_reason:
+            return
+        self._native_voice_last_skip_reason = reason
+        print(f"🔎 [VOICE] Native listener paused: {reason}", flush=True)
+
+    def _trace_native_voice_heartbeat(self, *, armed: bool, music_playing: bool, allow_passive_followup: bool) -> None:
+        now = time.time()
+        if now - self._native_voice_last_heartbeat < 5.0:
+            return
+        self._native_voice_last_heartbeat = now
+        speaking = bool(self.bridge and self.bridge.is_speaking)
+        print(
+            "🫀 [VOICE] heartbeat | "
+            f"armed={armed} speaking={speaking} music={music_playing} "
+            f"passive_followup={allow_passive_followup} "
+            f"cooldown_left={max(0.0, self._native_voice_cooldown_until - now):.1f}s "
+            f"mic_resume_left={max(0.0, self._native_mic_resume_at - now):.1f}s "
+            f"listen_window_left={max(0.0, self._native_listening_window_until - now):.1f}s",
+            flush=True,
+        )
+
+        self._send_voice_debug(
+            status="recording" if self._native_voice_armed else ("passive_followup" if allow_passive_followup else "listening"),
+            armed=armed,
+            music_playing=music_playing,
+            allow_passive_followup=allow_passive_followup,
+            skip_reason=self._native_voice_last_skip_reason,
+        )
+
+    def _send_voice_debug(
+        self,
+        *,
+        status: str,
+        armed: bool,
+        music_playing: bool,
+        allow_passive_followup: bool,
+        skip_reason: str,
+    ) -> None:
+        if not self.bridge:
+            return
+
+        now = time.time()
+        self.bridge.send_voice_debug({
+            "status": status,
+            "armed": armed,
+            "speaking": bool(self.bridge and self.bridge.is_speaking),
+            "musicPlaying": music_playing,
+            "passiveFollowup": allow_passive_followup,
+            "recording": bool(self.bridge and self.bridge.is_recording),
+            "skipReason": skip_reason,
+            "cooldownRemaining": max(0.0, self._native_voice_cooldown_until - now),
+            "micResumeRemaining": max(0.0, self._native_mic_resume_at - now),
+            "listenWindowRemaining": max(0.0, self._native_listening_window_until - now),
+        })
 
     def _start_native_voice_listener(self) -> None:
         if self._native_voice_thread and self._native_voice_thread.is_alive():
@@ -235,6 +329,14 @@ class JarvisWebSocketApp:
                 music_blocks_passive = music_playing and not music_override_active
 
                 if self.bridge and self.bridge.is_speaking:
+                    self._trace_native_voice_skip("JARVIS is speaking")
+                    self._send_voice_debug(
+                        status="muted_by_speaking",
+                        armed=self._native_voice_armed,
+                        music_playing=music_playing,
+                        allow_passive_followup=False,
+                        skip_reason="JARVIS is speaking",
+                    )
                     if self._native_voice_armed:
                         print("🔇 [VOICE] JARVIS speaking — aborting recording", flush=True)
                         self._recording_audio_buffer = []
@@ -246,6 +348,14 @@ class JarvisWebSocketApp:
                     continue
 
                 if music_blocks_passive:
+                    self._trace_native_voice_skip("Music is playing")
+                    self._send_voice_debug(
+                        status="music_blocked",
+                        armed=self._native_voice_armed,
+                        music_playing=music_playing,
+                        allow_passive_followup=False,
+                        skip_reason="Music is playing",
+                    )
                     print("🔇 [VOICE] Music is playing — passive follow-up paused", flush=True)
                     if self._native_voice_armed:
                         print("🔇 [VOICE] Music is playing — aborting recording", flush=True)
@@ -257,6 +367,15 @@ class JarvisWebSocketApp:
                         self._native_voice_armed = False
 
                 if time.time() < self._native_mic_resume_at:
+                    remaining = self._native_mic_resume_at - time.time()
+                    self._trace_native_voice_skip(f"Mic resume delay active ({remaining:.2f}s left)")
+                    self._send_voice_debug(
+                        status="mic_resume_delay",
+                        armed=self._native_voice_armed,
+                        music_playing=music_playing,
+                        allow_passive_followup=False,
+                        skip_reason="Mic resume delay",
+                    )
                     time.sleep(0.05)
                     continue
 
@@ -274,13 +393,55 @@ class JarvisWebSocketApp:
 
                     in_listening_window = time.time() < self._native_listening_window_until
                     allow_passive_followup = in_listening_window and not music_blocks_passive
+                    self._trace_native_voice_heartbeat(
+                        armed=self._native_voice_armed,
+                        music_playing=music_playing,
+                        allow_passive_followup=allow_passive_followup,
+                    )
 
                     if time.time() < self._native_voice_cooldown_until and not allow_passive_followup:
+                        remaining = self._native_voice_cooldown_until - time.time()
+                        self._trace_native_voice_skip(f"Commit cooldown active ({remaining:.2f}s left)")
+                        self._send_voice_debug(
+                            status="cooldown",
+                            armed=self._native_voice_armed,
+                            music_playing=music_playing,
+                            allow_passive_followup=allow_passive_followup,
+                            skip_reason="Commit cooldown",
+                        )
                         continue
 
                     seconds_since_output = time.time() - self._jarvis_last_output_at
                     if seconds_since_output < 1.0:
+                        self._trace_native_voice_skip(f"Waiting after assistant output ({1.0 - seconds_since_output:.2f}s left)")
+                        self._send_voice_debug(
+                            status="post_assistant_output",
+                            armed=self._native_voice_armed,
+                            music_playing=music_playing,
+                            allow_passive_followup=allow_passive_followup,
+                            skip_reason="Waiting after assistant output",
+                        )
                         continue
+
+                    if not self._native_voice_armed:
+                        if allow_passive_followup:
+                            self._trace_native_voice_skip("Passive follow-up listening")
+                            self._send_voice_debug(
+                                status="passive_followup",
+                                armed=False,
+                                music_playing=music_playing,
+                                allow_passive_followup=True,
+                                skip_reason="Passive follow-up listening",
+                            )
+                        else:
+                            self._trace_native_voice_skip("Waiting for wake word")
+                            self._send_voice_debug(
+                                status="waiting_for_wake_word",
+                                armed=False,
+                                music_playing=music_playing,
+                                allow_passive_followup=False,
+                                skip_reason="Waiting for wake word",
+                            )
 
                     frame_energy = float(np.mean(np.abs(audio.astype(np.float32))) / 32768.0)
                     dynamic_threshold = max(
@@ -457,6 +618,7 @@ class JarvisWebSocketApp:
         import time
         time.sleep(0.5)
 
+        self._start_speaker_verifier_warmup()
         self._start_native_voice_listener()
         
         self._start_session()
@@ -719,7 +881,7 @@ class JarvisWebSocketApp:
             self.bridge.set_speaking_state(is_speaking)
         if not is_speaking:
             self._jarvis_last_output_at = time.time()
-            self._native_mic_resume_at = time.time() + 1.0
+            self._native_mic_resume_at = time.time() + NATIVE_MIC_RESUME_DELAY_SECONDS
         else:
             self._native_mic_resume_at = float("inf")
 
@@ -814,6 +976,47 @@ class JarvisWebSocketApp:
                 self._total_audio_sent = 0
                 self._audio_chunk_count = 0
                 return
+
+            verifier = self._get_speaker_verifier()
+            if verifier is not None:
+                verification = verifier.verify_audio(b"".join(buffered_chunks))
+                if verification.active and not verification.allowed:
+                    similarity_text = "n/a" if verification.similarity is None else f"{verification.similarity:.2f}"
+                    threshold_text = "n/a" if verification.threshold is None else f"{verification.threshold:.2f}"
+                    print(
+                        f"🚫 [VOICE] Speaker verification failed (similarity={similarity_text}, threshold={threshold_text}) — discarding recording",
+                        flush=True,
+                    )
+                    self._total_audio_sent = 0
+                    self._audio_chunk_count = 0
+                    self._native_recording_has_speech = False
+                    self._native_voice_armed = False
+                    self._native_voice_cooldown_until = time.time() + 1.0
+                    self._native_listening_window_until = time.time() + 300.0
+                    self._native_speech_streak = 0
+                    self._native_pre_roll_audio.clear()
+                    if self.bridge:
+                        self.bridge.set_recording_state(False)
+                        self.bridge.send_status("connected", "Speaker verification rejected — try again")
+                        self.bridge.send_voice_debug({
+                            "status": "speaker_verification_rejected",
+                            "armed": False,
+                            "musicPlaying": False,
+                            "passiveFollowup": False,
+                            "recording": False,
+                            "skipReason": "Speaker verification rejected",
+                            "cooldownRemaining": 1.0,
+                            "micResumeRemaining": 0.0,
+                            "listenWindowRemaining": 0.0,
+                        })
+                    return
+                if verification.active:
+                    similarity_text = "n/a" if verification.similarity is None else f"{verification.similarity:.2f}"
+                    threshold_text = "n/a" if verification.threshold is None else f"{verification.threshold:.2f}"
+                    print(
+                        f"✅ [VOICE] Speaker verification passed (similarity={similarity_text}, threshold={threshold_text})",
+                        flush=True,
+                    )
 
             future = asyncio.run_coroutine_threadsafe(
                 self._commit_buffered_audio(buffered_chunks),

@@ -28,6 +28,20 @@ export interface BackendSpeakingMessage {
   isSpeaking: boolean
 }
 
+export interface BackendVoiceDebugMessage {
+  type: 'voice_debug'
+  armed: boolean
+  speaking: boolean
+  musicPlaying: boolean
+  passiveFollowup: boolean
+  recording: boolean
+  skipReason: string
+  cooldownRemaining: number
+  micResumeRemaining: number
+  listenWindowRemaining: number
+  status: string
+}
+
 export interface BackendMailDraftMessage {
   type: 'mail_draft'
   account: 'gmail' | 'zimbra'
@@ -35,6 +49,24 @@ export interface BackendMailDraftMessage {
   subject: string
   body: string
   rawText: string
+}
+
+export interface SpeakerProfileStatus {
+  verificationEnabled: boolean
+  profileExists: boolean
+  profilePath: string
+  threshold: number
+  modelName: string
+  embeddingCount: number
+  createdAt: string | null
+  loadError: string | null
+}
+
+export interface SpeakerProfileEnrollResponse {
+  success: boolean
+  profile?: SpeakerProfileStatus
+  removed?: boolean
+  error?: string
 }
 
 export interface SystemMetrics {
@@ -60,7 +92,21 @@ export type BackendMessage =
   | BackendConversationMessage
   | BackendRecordingMessage
   | BackendSpeakingMessage
+  | BackendVoiceDebugMessage
   | BackendMailDraftMessage
+
+export interface VoiceDebugState {
+  armed: boolean
+  speaking: boolean
+  musicPlaying: boolean
+  passiveFollowup: boolean
+  recording: boolean
+  skipReason: string
+  cooldownRemaining: number
+  micResumeRemaining: number
+  listenWindowRemaining: number
+  status: string
+}
 
 export interface JarvisState {
   connectionState: ConnectionState
@@ -74,6 +120,7 @@ export interface JarvisState {
   pendingMailDraft: MailDraft | null
   isWakeListening: boolean
   wakeWord: string
+  voiceDebug: VoiceDebugState | null
 }
 
 export interface JarvisActions {

@@ -1,4 +1,5 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+import type { SpeakerProfileEnrollResponse, SpeakerProfileStatus } from '../types'
 
 export interface QdrantConfig {
   host: string
@@ -394,6 +395,72 @@ export function useSettings() {
     }
   }, [])
 
+  const getSpeakerProfileStatus = useCallback(async (): Promise<SpeakerProfileStatus | null> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/speaker/profile`)
+      if (!response.ok) return null
+      return await response.json()
+    } catch {
+      return null
+    }
+  }, [])
+
+  const enrollSpeakerProfile = useCallback(async (files: Array<File | Blob>): Promise<SpeakerProfileEnrollResponse | null> => {
+    if (!files.length) {
+      return { success: false, error: 'No audio files selected' }
+    }
+
+    setIsLoading(true)
+    setError(null)
+
+    try {
+      const formData = new FormData()
+      files.forEach((file, index) => {
+        const name = file instanceof File ? file.name || `speaker-sample-${index + 1}.wav` : `speaker-sample-${index + 1}.wav`
+        formData.append('audio', file, name)
+      })
+
+      const response = await fetch(`${API_BASE_URL}/api/speaker/profile/enroll`, {
+        method: 'POST',
+        body: formData
+      })
+      const data = await response.json()
+
+      if (!response.ok || !data.success) {
+        setError(data.error || 'Failed to enroll speaker profile')
+        return data
+      }
+
+      return data
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to enroll speaker profile'
+      setError(msg)
+      return { success: false, error: msg }
+    } finally {
+      setIsLoading(false)
+    }
+  }, [])
+
+  const clearSpeakerProfile = useCallback(async (): Promise<boolean> => {
+    setIsLoading(true)
+    setError(null)
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/speaker/profile`, { method: 'DELETE' })
+      const data = await response.json()
+      if (!response.ok || !data.success) {
+        setError(data.error || 'Failed to clear speaker profile')
+        return false
+      }
+      return true
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to clear speaker profile'
+      setError(msg)
+      return false
+    } finally {
+      setIsLoading(false)
+    }
+  }, [])
+
   const testZimbraConnection = useCallback(async (): Promise<{ok: boolean, error?: string}> => {
     setIsLoading(true)
     setError(null)
@@ -536,6 +603,9 @@ export function useSettings() {
     checkObsidianStatus,
     getGoogleStatus,
     checkDashboardHealth,
+    getSpeakerProfileStatus,
+    enrollSpeakerProfile,
+    clearSpeakerProfile,
     saveSettings,
     loadSettings,
     clearError: () => setError(null)

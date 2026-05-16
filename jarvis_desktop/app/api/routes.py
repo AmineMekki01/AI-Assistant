@@ -28,3 +28,7 @@ def register_routes(app):
 
     app.router.add_post('/api/settings/save', handlers.handle_save_settings)
     app.router.add_get('/api/settings/load', handlers.handle_load_settings)
+
+    app.router.add_get('/api/speaker/profile', handlers.handle_speaker_profile_status)
+    app.router.add_post('/api/speaker/profile/enroll', handlers.handle_speaker_profile_enroll)
+    app.router.add_delete('/api/speaker/profile', handlers.handle_speaker_profile_clear)

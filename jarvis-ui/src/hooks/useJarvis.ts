@@ -119,6 +119,7 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
     messages,
     isRecording: wsIsRecording,
     isSpeaking,
+    voiceDebug,
     toggleRecording,
     sendAudioChunk,
     send,
@@ -320,8 +321,9 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
     systemMetrics,
     pendingMailDraft,
     isWakeListening,
-    wakeWord: voiceSettings.wakeWord
-  }), [connectionState, statusMessage, messages, uiRecording, isSpeaking, audioLevel, currentTime, systemMetrics, pendingMailDraft, isWakeListening, voiceSettings.wakeWord])
+    wakeWord: voiceSettings.wakeWord,
+    voiceDebug
+  }), [connectionState, statusMessage, messages, uiRecording, isSpeaking, audioLevel, currentTime, systemMetrics, pendingMailDraft, isWakeListening, voiceSettings.wakeWord, voiceDebug])
 
   const actions: JarvisActions = useMemo(() => ({
     toggleRecording: handleToggleRecording,

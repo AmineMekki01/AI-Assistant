@@ -12,7 +12,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const { state, actions } = useJarvis()
 
-  const { connectionState, statusMessage, messages, isRecording, isSpeaking, audioLevel, currentTime, systemMetrics, pendingMailDraft, isWakeListening, wakeWord } = state
+  const { connectionState, statusMessage, messages, isRecording, isSpeaking, audioLevel, currentTime, systemMetrics, pendingMailDraft, isWakeListening, wakeWord, voiceDebug } = state
   const briefingStatusMessage = statusMessage.startsWith('Hang on') ? statusMessage : ''
 
   const latestMessage = messages[messages.length - 1]
@@ -102,6 +102,7 @@ function App() {
           isRecording={isRecording}
           isSpeaking={isSpeaking}
           systemMetrics={systemMetrics}
+          voiceDebug={voiceDebug}
         />
       </main>
 

@@ -10,7 +10,7 @@ import pytest
 from aiohttp import web
 
 from app.api import routes
-from app.api.handlers import health, google, settings, storage, system
+from app.api.handlers import health, google, settings, speaker, storage, system
 from app.core import config as config_module
 from app.services import google_auth as google_auth_module
 
@@ -28,6 +28,48 @@ class FakeRequest:
 class BrokenRequest:
     async def json(self):
         raise ValueError("broken request")
+
+
+class FakeMultipartField:
+    def __init__(self, name, value=None, filename=None, payload: bytes = b""):
+        self.name = name
+        self.filename = filename
+        self._value = value
+        self._payload = payload
+        self._offset = 0
+
+    async def text(self):
+        return str(self._value or "")
+
+    async def read_chunk(self, size=8192):
+        if self._offset >= len(self._payload):
+            return b""
+        chunk = self._payload[self._offset:self._offset + size]
+        self._offset += len(chunk)
+        return chunk
+
+
+class FakeMultipartReader:
+    def __init__(self, fields):
+        self.fields = list(fields)
+        self.index = 0
+
+    async def next(self):
+        if self.index >= len(self.fields):
+            return None
+        field = self.fields[self.index]
+        self.index += 1
+        return field
+
+
+class FakeMultipartRequest(FakeRequest):
+    def __init__(self, fields, remote="127.0.0.1"):
+        super().__init__(payload={}, remote=remote)
+        self.content_type = "multipart/form-data"
+        self._fields = fields
+
+    async def multipart(self):
+        return FakeMultipartReader(self._fields)
 
 
 class FakeOAuthResponse:
@@ -209,6 +251,56 @@ async def test_settings_handlers_save_and_load(temp_home):
 
     loaded = await settings.handle_load_settings(FakeRequest())
     assert json.loads(loaded.text) == payload
+
+
+@pytest.mark.asyncio
+async def test_speaker_profile_handlers_status_enroll_and_clear(temp_home, monkeypatch):
+    profile_path = temp_home / ".jarvis" / "voice" / "speaker_profile.json"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(json.dumps({"embeddings": [[1.0, 0.0, 0.0]], "threshold": 0.42, "model_name": "fake-model"}))
+
+    settings_snapshot = SimpleNamespace(
+        speaker_verification_enabled=True,
+        speaker_profile_path=str(profile_path),
+        speaker_verification_threshold=0.42,
+        speaker_verification_model_name="fake-model",
+    )
+    monkeypatch.setattr(config_module, "get_settings", lambda: settings_snapshot)
+    monkeypatch.setattr(speaker, "get_settings", lambda: settings_snapshot)
+
+    def fake_enroll(cls, audio_paths, profile_path=None, threshold=0.35):
+        return SimpleNamespace(
+            embeddings=[[1.0, 0.0, 0.0]],
+            threshold=threshold,
+            model_name="fake-model",
+            created_at="2026-05-16T00:00:00Z",
+        )
+
+    monkeypatch.setattr(speaker.SpeakerVerifier, "enroll_from_audio_paths", classmethod(fake_enroll))
+
+    status_response = await speaker.handle_speaker_profile_status(FakeRequest())
+    status_payload = json.loads(status_response.text)
+    assert status_payload["profileExists"] is True
+    assert status_payload["embeddingCount"] == 1
+    assert status_payload["verificationEnabled"] is True
+
+    enroll_response = await speaker.handle_speaker_profile_enroll(
+        FakeMultipartRequest([
+            FakeMultipartField("threshold", value="0.5"),
+            FakeMultipartField("audio", filename="sample.wav", payload=b"fake-wav-data"),
+        ])
+    )
+    enroll_payload = json.loads(enroll_response.text)
+    assert enroll_payload["success"] is True
+    assert enroll_payload["profile"]["profilePath"] == str(profile_path)
+    assert enroll_payload["profile"]["verificationEnabled"] is True
+    assert enroll_payload["profile"]["embeddingCount"] == 1
+
+    clear_response = await speaker.handle_speaker_profile_clear(FakeRequest())
+    clear_payload = json.loads(clear_response.text)
+    assert clear_payload["success"] is True
+    assert clear_payload["removed"] is True
+    assert not profile_path.exists()
 
 
 @pytest.mark.asyncio
@@ -471,6 +563,9 @@ async def test_storage_helpers_and_routes(monkeypatch, temp_home):
         def add_post(self, path, handler):
             self.calls.append(("POST", path, handler.__name__))
 
+        def add_delete(self, path, handler):
+            self.calls.append(("DELETE", path, handler.__name__))
+
     class FakeApp:
         def __init__(self):
             self.router = FakeRouter()
@@ -484,6 +579,9 @@ async def test_storage_helpers_and_routes(monkeypatch, temp_home):
     assert "/api/google/disconnect" in paths
     assert "/api/settings/load" in paths
     assert "/api/obsidian/sync" in paths
+    assert ("GET", "/api/speaker/profile", "handle_speaker_profile_status") in fake_app.router.calls
+    assert ("POST", "/api/speaker/profile/enroll", "handle_speaker_profile_enroll") in fake_app.router.calls
+    assert ("DELETE", "/api/speaker/profile", "handle_speaker_profile_clear") in fake_app.router.calls
 
 
 @pytest.mark.asyncio

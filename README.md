@@ -43,7 +43,8 @@ Open http://localhost:5173 and start talking.
 | Feature | What it does |
 |---------|-------------|
 | 🎤 Realtime voice | Streams PCM16 audio to OpenAI's Realtime API |
-| 📧 Mail | Unified Gmail + Zimbra/OVH (one tool, fan-out) |
+| �️ Speaker verification | Optional voice enrollment and cached verification on startup |
+| �📧 Mail | Unified Gmail + Zimbra/OVH (one tool, fan-out) |
 | 📅 Calendar | Unified Google + Apple Calendar |
 | 🎵 Apple Music | AppleScript control with UI-automation fallback |
 | 📚 Knowledge | Obsidian vault RAG via Qdrant |
@@ -58,6 +59,8 @@ All tools use a **write-before-confirm** gate for destructive actions (sending m
 
 - [`jarvis_desktop/README.md`](jarvis_desktop/README.md) - Backend setup, env vars, macOS permissions, HTTP API reference
 - [`jarvis-ui/README.md`](jarvis-ui/README.md) - Frontend setup, WebSocket protocol, project structure
+
+Speaker verification setup, enrollment, and cache warmup are documented in the backend README.
 
 ---
 
