@@ -369,6 +369,7 @@ async def test_main_app_session_wiring_and_shutdown(monkeypatch):
     assert bridge.speaking_calls[-1] is True
     assert app._native_mic_resume_at == float("inf")
 
+    monkeypatch.setattr(main.time, "time", lambda: 100.0)
     app._on_speaking(False)
     bridge.is_speaking = False
 
@@ -388,8 +389,7 @@ async def test_main_app_session_wiring_and_shutdown(monkeypatch):
     assert bridge.speaking_calls[-1] is False
     assert app._speaking_timer is None
 
-    app._on_speaking(False)
-    assert app._native_mic_resume_at > 0
+    assert app._native_mic_resume_at == pytest.approx(100.0 + main.NATIVE_MIC_RESUME_DELAY_SECONDS)
 
     app.stop()
     assert bridge.stop_called is True
@@ -438,3 +438,204 @@ def test_native_silence_timeout_adapts_to_longer_speech():
     assert main.JarvisWebSocketApp._native_silence_timeout(0.4) == 1.2
     assert main.JarvisWebSocketApp._native_silence_timeout(2.0) == 1.8
     assert main.JarvisWebSocketApp._native_silence_timeout(5.0) == 2.1
+
+
+def test_main_speaker_verification_rejects_non_enrolled_voice(monkeypatch):
+    main = importlib.import_module("main")
+
+    app = main.JarvisWebSocketApp()
+    app.session = FakeSession()
+    app.event_loop = object()
+    status_calls = []
+    voice_debug_calls = []
+    app.bridge = SimpleNamespace(
+        set_recording_state=lambda flag: None,
+        send_status=lambda state, message: status_calls.append((state, message)),
+        send_voice_debug=lambda payload: voice_debug_calls.append(payload),
+    )
+    app._recording_audio_buffer = [b"chunk-1", b"chunk-2"]
+    app._audio_chunk_count = 2
+    app._total_audio_sent = 14
+    app._native_recording_has_speech = True
+    app._native_voice_armed = True
+    app._native_speech_streak = 2
+    app._speaker_verifier = SimpleNamespace(
+        verify_audio=lambda audio: SimpleNamespace(active=True, allowed=False, similarity=0.12, threshold=0.35)
+    )
+
+    monkeypatch.setattr(main.time, "sleep", lambda seconds: None)
+
+    app._on_commit_audio()
+
+    assert app.session.commits == 0
+    assert app._recording_audio_buffer == []
+    assert app._native_voice_armed is False
+    assert app._native_recording_has_speech is False
+    assert app._total_audio_sent == 0
+    assert app._audio_chunk_count == 0
+    assert status_calls[-1] == ("connected", "Speaker verification rejected — try again")
+    assert voice_debug_calls[-1]["status"] == "speaker_verification_rejected"
+
+
+def test_main_speaker_verification_allows_enrolled_voice(monkeypatch):
+    main = importlib.import_module("main")
+
+    app = main.JarvisWebSocketApp()
+    app.session = FakeSession()
+    app.event_loop = object()
+    app.bridge = SimpleNamespace(set_recording_state=lambda flag: None)
+    app._recording_audio_buffer = [b"chunk-1", b"chunk-2"]
+    app._audio_chunk_count = 2
+    app._total_audio_sent = 14
+    app._native_recording_has_speech = True
+    app._native_voice_armed = True
+    app._speaker_verifier = SimpleNamespace(
+        verify_audio=lambda audio: SimpleNamespace(active=True, allowed=True, similarity=0.84, threshold=0.35)
+    )
+
+    future_calls = []
+
+    def fake_run_coroutine_threadsafe(coro, loop):
+        future_calls.append(loop)
+        asyncio.run(coro)
+        return FakeFuture()
+
+    monkeypatch.setattr(main.asyncio, "run_coroutine_threadsafe", fake_run_coroutine_threadsafe)
+    monkeypatch.setattr(main.time, "sleep", lambda seconds: None)
+
+    app._on_commit_audio()
+
+    assert app.session.commits == 1
+    assert app.session.appended_audio == [b"chunk-1", b"chunk-2"]
+    assert future_calls == [app.event_loop]
+    assert app._recording_audio_buffer == []
+    assert app._total_audio_sent == 0
+    assert app._audio_chunk_count == 0
+
+
+def test_speaker_verifier_reads_persisted_profile(tmp_path):
+    from app.core.speaker_verification import SpeakerVerifier
+
+    profile_path = tmp_path / "speaker_profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "threshold": 0.35,
+                "embeddings": [[1.0, 0.0, 0.0], [0.9, 0.1, 0.0]],
+            }
+        )
+    )
+
+    verifier = SpeakerVerifier(profile_path=profile_path)
+    embedding = verifier._load_reference_embedding()
+
+    assert embedding is not None
+    assert verifier.profile_path == profile_path
+    assert verifier._profile_threshold == 0.35
+
+
+def test_speaker_verifier_preload_reuses_cached_profile(tmp_path, monkeypatch):
+    from app.core.speaker_verification import SpeakerVerifier
+
+    profile_path = tmp_path / "speaker_profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "threshold": 0.35,
+                "model_name": "cached-model",
+                "embeddings": [[1.0, 0.0, 0.0]],
+            }
+        )
+    )
+
+    SpeakerVerifier.invalidate_cached_profile()
+    monkeypatch.setattr(SpeakerVerifier, "_load_classifier", lambda self: object())
+
+    first = SpeakerVerifier(profile_path=profile_path)
+    assert first.preload() is True
+
+    second = SpeakerVerifier(profile_path=profile_path)
+
+    def fail_if_disk_is_hit():
+        raise AssertionError("cache was not used")
+
+    monkeypatch.setattr(second, "_load_profile_payload", fail_if_disk_is_hit)
+    cached_embedding = second._load_reference_embedding()
+
+    assert cached_embedding is not None
+    assert np.allclose(cached_embedding, first._load_reference_embedding())
+
+
+def test_speaker_verifier_cache_invalidates_on_profile_update(tmp_path, monkeypatch):
+    from app.core.speaker_verification import SpeakerVerifier
+
+    profile_path = tmp_path / "speaker_profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "threshold": 0.35,
+                "model_name": "cached-model",
+                "embeddings": [[1.0, 0.0, 0.0]],
+            }
+        )
+    )
+
+    SpeakerVerifier.invalidate_cached_profile()
+    monkeypatch.setattr(SpeakerVerifier, "_load_classifier", lambda self: object())
+
+    verifier = SpeakerVerifier(profile_path=profile_path)
+    assert verifier.preload() is True
+
+    profile_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "threshold": 0.35,
+                "model_name": "cached-model",
+                "embeddings": [[0.0, 1.0, 0.0]],
+            }
+        )
+    )
+
+    verifier_after_update = SpeakerVerifier(profile_path=profile_path)
+    load_calls = []
+    original_load_profile_payload = verifier_after_update._load_profile_payload
+
+    def tracked_load_profile_payload():
+        load_calls.append(True)
+        return original_load_profile_payload()
+
+    monkeypatch.setattr(verifier_after_update, "_load_profile_payload", tracked_load_profile_payload)
+    embedding = verifier_after_update._load_reference_embedding()
+
+    assert embedding is not None
+    assert load_calls == [True]
+
+
+def test_main_startup_warms_speaker_verifier_cache(monkeypatch):
+    main = importlib.import_module("main")
+
+    app = main.JarvisWebSocketApp()
+    preload_calls = []
+
+    app._get_speaker_verifier = lambda: SimpleNamespace(
+        profile_path=SimpleNamespace(__str__=lambda self: "speaker_profile.json"),
+        preload=lambda: preload_calls.append(True) or True,
+    )
+
+    class ImmediateThread:
+        def __init__(self, target, daemon=False):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(main.threading, "Thread", ImmediateThread)
+
+    app._start_speaker_verifier_warmup()
+
+    assert preload_calls == [True]

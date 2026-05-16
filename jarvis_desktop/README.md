@@ -39,6 +39,25 @@ OPENAI_API_KEY=sk-your-key-here
 
 Everything else is optional. See [`.env.example`](.env.example) for the full list.
 
+### Speaker verification
+
+Speaker verification is optional. When enabled, the backend will preload the current speaker profile on startup so the first verification check is faster.
+
+Configure these environment variables if you want to use it:
+
+```bash
+JARVIS_SPEAKER_VERIFICATION_ENABLED=true
+JARVIS_SPEAKER_PROFILE_PATH=~/.jarvis/voice/speaker_profile.json
+JARVIS_SPEAKER_VERIFICATION_THRESHOLD=0.35
+JARVIS_SPEAKER_VERIFICATION_MODEL_NAME=speechbrain/spkrec-ecapa-voxceleb
+```
+
+Behavior notes:
+
+- **Startup preload** - If a profile exists, JARVIS warms the verifier model and speaker embedding in the background at launch.
+- **Profile updates** - Re-enrollment clears the cached embedding and reloads the new profile immediately.
+- **Missing profile** - The app does not crash; it falls back to lazy loading and continues running normally.
+
 ### 3. Start Qdrant (optional)
 
 Qdrant powers the Obsidian knowledge base and long-term memory. You can skip it - JARVIS falls back to a local JSON file for memory.
@@ -153,6 +172,7 @@ jarvis_desktop/
 │   ├── core/
 │   │   ├── realtime_session.py # OpenAI Realtime client + JARVIS persona
 │   │   ├── websocket_bridge.py # frontend WS + HTTP API + Obsidian sync
+│   │   ├── speaker_verification.py # speaker profile loading, caching, and verification
 │   │   ├── config.py
 │   │   └── logging.py
 │   ├── agents/
@@ -196,6 +216,9 @@ Grant access to whichever app launches the script - Terminal, iTerm, VS Code, et
 | GET/POST | `/api/settings/load` \| `/save` | Settings UI persistence |
 | POST | `/api/qdrant/test`, GET `/api/qdrant/status` | Qdrant health |
 | POST | `/api/obsidian/sync`, GET `/api/obsidian/status` | Vault ingestion |
+| GET | `/api/speaker/profile/status` | Speaker profile status and cache summary |
+| POST | `/api/speaker/profile/enroll` | Enroll or replace the speaker profile |
+| DELETE | `/api/speaker/profile` | Clear the persisted speaker profile |
 | GET | `/api/google/status` | Google OAuth state |
 | POST | `/api/zimbra/test`, GET `/api/zimbra/status` | IMAP/SMTP login |
 | POST | `/api/apple_calendar/test`, GET `/api/apple_calendar/status`, `/calendars` | macOS Calendar probe |

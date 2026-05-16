@@ -59,7 +59,7 @@ class FakeSessionSocket:
 async def test_build_session_config_uses_configured_voice(monkeypatch):
     monkeypatch.setattr(rs, "load_all_capabilities", lambda: None)
     monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
-        openai_realtime_voice="onyx",
+        openai_realtime_voice="alloy",
         personal_info={"name": "Amine"},
     ))
 
@@ -67,7 +67,7 @@ async def test_build_session_config_uses_configured_voice(monkeypatch):
     payload = session._build_session_config([])
 
     assert payload["type"] == "session.update"
-    assert payload["session"]["voice"] == "onyx"
+    assert payload["session"]["voice"] == "alloy"
     assert "delegate_to_briefing" in payload["session"]["instructions"]
     assert "latest information" in payload["session"]["instructions"]
     assert "ask a clarifying question instead of delegating" in payload["session"]["instructions"]
@@ -79,7 +79,7 @@ async def test_speak_direct_text_uses_openai_tts_voice(monkeypatch):
     monkeypatch.setattr(rs, "load_all_capabilities", lambda: None)
     monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
         openai_api_key="test-key",
-        openai_realtime_voice="onyx",
+        openai_realtime_voice="alloy",
     ))
     monkeypatch.setattr(rs.httpx, "AsyncClient", FakeAsyncClient)
     monkeypatch.setattr(rs.shutil, "which", lambda name: "/usr/bin/afplay" if name == "afplay" else None)
@@ -104,7 +104,7 @@ async def test_speak_direct_text_uses_openai_tts_voice(monkeypatch):
     assert speaking[0] is True
     assert speaking[-1] is False
     assert fake_process.wait_called is True
-    assert FakeAsyncClient.last_instance.calls[0]["json"]["voice"] == "onyx"
+    assert FakeAsyncClient.last_instance.calls[0]["json"]["voice"] == "alloy"
 
 
 @pytest.mark.asyncio

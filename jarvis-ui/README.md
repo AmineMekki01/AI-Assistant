@@ -9,6 +9,8 @@ React + TypeScript + Vite voice interface for the JARVIS assistant. Hold the mic
 - **Node.js 18+**
 - The **Python backend** running on `ws://localhost:8000`
 
+If you want to use speaker verification, the backend must also have speaker verification enabled and an enrolled profile available. The Voice tab can manage that profile directly.
+
 ---
 
 ## Setup
@@ -109,4 +111,7 @@ Settings are persisted to `~/.jarvis/settings.json` via the backend:
 - **Personal Info** - Name, default location, timezone
 - **Integrations** - Google OAuth, Tavily API key, Qdrant settings
 - **Obsidian Vault** - Path for knowledge base sync
+- **Voice tab** - Speaker verification enrollment, profile status, and profile clearing
+
+The Voice tab uploads or records sample speech, then sends it to the backend to create or replace the speaker profile. When a profile is saved, the backend refreshes its in-memory cache automatically.
 
