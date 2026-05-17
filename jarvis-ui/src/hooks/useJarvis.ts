@@ -8,12 +8,22 @@ interface VoiceSettings {
   enabled: boolean
   wakeWord: string
   sensitivity: number
+  clapEnabled: boolean
+  introSoundPath: string
+  activationGreeting: string
+  announceStatus: boolean
+  announceCalendar: boolean
 }
 
 const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   enabled: true,
   wakeWord: 'Hey JARVIS',
-  sensitivity: 0.5
+  sensitivity: 0.5,
+  clapEnabled: true,
+  introSoundPath: '',
+  activationGreeting: 'Welcome home, sir.',
+  announceStatus: true,
+  announceCalendar: true
 }
 
 function readVoiceSettingsFromStorage(): VoiceSettings {
@@ -33,7 +43,12 @@ function readVoiceSettingsFromStorage(): VoiceSettings {
     return {
       enabled: typeof voice.enabled === 'boolean' ? voice.enabled : DEFAULT_VOICE_SETTINGS.enabled,
       wakeWord: typeof voice.wakeWord === 'string' && voice.wakeWord.trim() ? voice.wakeWord.trim() : DEFAULT_VOICE_SETTINGS.wakeWord,
-      sensitivity: typeof voice.sensitivity === 'number' ? voice.sensitivity : DEFAULT_VOICE_SETTINGS.sensitivity
+      sensitivity: typeof voice.sensitivity === 'number' ? voice.sensitivity : DEFAULT_VOICE_SETTINGS.sensitivity,
+      clapEnabled: typeof voice.clapEnabled === 'boolean' ? voice.clapEnabled : DEFAULT_VOICE_SETTINGS.clapEnabled,
+      introSoundPath: typeof voice.introSoundPath === 'string' ? voice.introSoundPath : DEFAULT_VOICE_SETTINGS.introSoundPath,
+      activationGreeting: typeof voice.activationGreeting === 'string' && voice.activationGreeting.trim() ? voice.activationGreeting.trim() : DEFAULT_VOICE_SETTINGS.activationGreeting,
+      announceStatus: typeof voice.announceStatus === 'boolean' ? voice.announceStatus : DEFAULT_VOICE_SETTINGS.announceStatus,
+      announceCalendar: typeof voice.announceCalendar === 'boolean' ? voice.announceCalendar : DEFAULT_VOICE_SETTINGS.announceCalendar
     }
   } catch {
     return DEFAULT_VOICE_SETTINGS
@@ -167,7 +182,12 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
       setVoiceSettings(prev => ({
         enabled: typeof detail.voice.enabled === 'boolean' ? detail.voice.enabled : prev.enabled,
         wakeWord: typeof detail.voice.wakeWord === 'string' && detail.voice.wakeWord.trim() ? detail.voice.wakeWord.trim() : prev.wakeWord,
-        sensitivity: typeof detail.voice.sensitivity === 'number' ? detail.voice.sensitivity : prev.sensitivity
+        sensitivity: typeof detail.voice.sensitivity === 'number' ? detail.voice.sensitivity : prev.sensitivity,
+        clapEnabled: typeof detail.voice.clapEnabled === 'boolean' ? detail.voice.clapEnabled : prev.clapEnabled,
+        introSoundPath: typeof detail.voice.introSoundPath === 'string' ? detail.voice.introSoundPath : prev.introSoundPath,
+        activationGreeting: typeof detail.voice.activationGreeting === 'string' && detail.voice.activationGreeting.trim() ? detail.voice.activationGreeting.trim() : prev.activationGreeting,
+        announceStatus: typeof detail.voice.announceStatus === 'boolean' ? detail.voice.announceStatus : prev.announceStatus,
+        announceCalendar: typeof detail.voice.announceCalendar === 'boolean' ? detail.voice.announceCalendar : prev.announceCalendar
       }))
     }
 

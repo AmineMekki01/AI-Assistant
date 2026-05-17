@@ -6,6 +6,11 @@ from functools import lru_cache
 from pathlib import Path
 
 
+def _default_activation_sound_path() -> str:
+    candidate = Path(__file__).resolve().parents[3] / "audio" / "jarvis_guitar_music.m4a"
+    return str(candidate) if candidate.exists() else ""
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -28,7 +33,7 @@ class Settings:
     
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_realtime_model: str = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-mini")
-    openai_realtime_voice: str = os.getenv("OPENAI_REALTIME_VOICE", "onyx")
+    openai_realtime_voice: str = os.getenv("OPENAI_REALTIME_VOICE", "ash")
     openai_utility_model: str = os.getenv("OPENAI_UTILITY_MODEL", "gpt-5.4-nano")
     openai_embedding_model: str = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
     
@@ -81,6 +86,14 @@ class Settings:
                         "enabled": bool(voice.get("enabled", True)),
                         "wakeWord": voice.get("wakeWord", "Hey JARVIS"),
                         "sensitivity": float(voice.get("sensitivity", 0.5)),
+                        "clapEnabled": bool(voice.get("clapEnabled", True)),
+                        "introSoundPath": voice.get("introSoundPath") or os.getenv("JARVIS_ACTIVATION_SOUND_PATH") or _default_activation_sound_path(),
+                        "activationGreeting": voice.get(
+                            "activationGreeting",
+                            os.getenv("JARVIS_ACTIVATION_GREETING", "Welcome home, sir."),
+                        ),
+                        "announceStatus": bool(voice.get("announceStatus", True)),
+                        "announceCalendar": bool(voice.get("announceCalendar", True)),
                     }
             except Exception:
                 pass
@@ -88,6 +101,11 @@ class Settings:
             "enabled": True,
             "wakeWord": "Hey JARVIS",
             "sensitivity": 0.5,
+            "clapEnabled": True,
+            "introSoundPath": os.getenv("JARVIS_ACTIVATION_SOUND_PATH") or _default_activation_sound_path(),
+            "activationGreeting": os.getenv("JARVIS_ACTIVATION_GREETING", "Welcome home, sir."),
+            "announceStatus": True,
+            "announceCalendar": True,
         }
     
     @property

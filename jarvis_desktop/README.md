@@ -58,6 +58,17 @@ Behavior notes:
 - **Profile updates** - Re-enrollment clears the cached embedding and reloads the new profile immediately.
 - **Missing profile** - The app does not crash; it falls back to lazy loading and continues running normally.
 
+### Voice activation flow
+
+The voice layer now supports both wake-word and clap activation.
+
+- **Wake word** - `Hey JARVIS` by default, configurable in Settings.
+- **Clap trigger** - Optional secondary trigger that arms the same activation sequence.
+- **Intro sound** - Point `voice.introSoundPath` or `JARVIS_ACTIVATION_SOUND_PATH` to a local audio file if you want a short intro sting before the greeting.
+- **Greeting / status** - Configure the spoken greeting and whether JARVIS should read a short connection summary and the next calendar items after activation.
+
+The intro sound is played locally on macOS with `afplay`, so use a file that exists on your machine.
+
 ### 3. Start Qdrant (optional)
 
 Qdrant powers the Obsidian knowledge base and long-term memory. You can skip it - JARVIS falls back to a local JSON file for memory.

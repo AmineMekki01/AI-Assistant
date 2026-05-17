@@ -59,6 +59,9 @@ class JarvisWebSocketApp:
         self._native_voice_last_status = ""
         self._native_voice_last_skip_reason = ""
         self._native_voice_last_heartbeat = 0.0
+        self._native_last_frame_energy = 0.0
+        self._native_clap_cooldown_until = 0.0
+        self._activation_sequence_running = False
         self.pending_mail_draft = None
         self._recording_audio_buffer = []
         self._audio_chunk_count = 0
@@ -88,10 +91,24 @@ class JarvisWebSocketApp:
                 "enabled": bool(voice.get("enabled", True)),
                 "wakeWord": voice.get("wakeWord", "Hey JARVIS"),
                 "sensitivity": float(voice.get("sensitivity", 0.5)),
+                "clapEnabled": bool(voice.get("clapEnabled", True)),
+                "introSoundPath": str(voice.get("introSoundPath") or "").strip(),
+                "activationGreeting": str(voice.get("activationGreeting") or "Welcome home, sir.").strip() or "Welcome home, sir.",
+                "announceStatus": bool(voice.get("announceStatus", True)),
+                "announceCalendar": bool(voice.get("announceCalendar", True)),
             }
         except Exception as e:
             print(f"⚠️  [VOICE] Failed to load voice settings: {e}")
-            return {"enabled": True, "wakeWord": "Hey JARVIS", "sensitivity": 0.5}
+            return {
+                "enabled": True,
+                "wakeWord": "Hey JARVIS",
+                "sensitivity": 0.5,
+                "clapEnabled": True,
+                "introSoundPath": "",
+                "activationGreeting": "Welcome home, sir.",
+                "announceStatus": True,
+                "announceCalendar": True,
+            }
 
     @staticmethod
     def _native_voice_dependencies() -> list[str]:
@@ -132,6 +149,325 @@ class JarvisWebSocketApp:
     def _start_speaker_verifier_warmup(self) -> None:
         thread = threading.Thread(target=self._warm_speaker_verifier_cache, daemon=True)
         thread.start()
+
+    def _activation_voice_settings(self) -> dict:
+        voice = self._voice_settings()
+        return {
+            "enabled": bool(voice.get("enabled", True)),
+            "wakeWord": str(voice.get("wakeWord") or "Hey JARVIS").strip() or "Hey JARVIS",
+            "sensitivity": float(voice.get("sensitivity", 0.5)),
+            "clapEnabled": bool(voice.get("clapEnabled", True)),
+            "introSoundPath": str(voice.get("introSoundPath") or "").strip(),
+            "activationGreeting": str(voice.get("activationGreeting") or "Welcome home, sir.").strip() or "Welcome home, sir.",
+            "announceStatus": bool(voice.get("announceStatus", True)),
+            "announceCalendar": bool(voice.get("announceCalendar", True)),
+        }
+
+    @staticmethod
+    def _summarize_calendar_output(raw_output: str) -> str:
+        lines = [line.strip() for line in (raw_output or "").splitlines() if line.strip()]
+        if not lines:
+            return ""
+
+        if lines[0].lower().startswith("error"):
+            return ""
+
+        if lines[0].lower().startswith("no events"):
+            return "No upcoming calendar events."
+
+        items: list[str] = []
+        for line in lines:
+            if line.startswith("──"):
+                continue
+            if "event(s)" in line and line.endswith(":"):
+                continue
+
+            cleaned = line.lstrip("•").strip()
+            if "|" in cleaned:
+                when_part, summary_part = cleaned.split("|", 1)
+                when = when_part.replace("->", "to").strip()
+                summary = summary_part.strip()
+                if summary:
+                    items.append(f"{summary} at {when}")
+            elif cleaned:
+                items.append(cleaned)
+
+            if len(items) >= 2:
+                break
+
+        if not items:
+            return ""
+        if len(items) == 1:
+            return f"Your next calendar item is {items[0]}."
+        return "Your next calendar items are " + "; ".join(items) + "."
+
+    async def _wait_for_session_ready(self, timeout: float = 5.0) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.session is not None:
+                return True
+            await asyncio.sleep(0.1)
+        return self.session is not None
+
+    async def _play_activation_sound(self, sound_path: str) -> bool:
+        if not sound_path:
+            return False
+
+        path = Path(sound_path).expanduser()
+        if not path.exists():
+            print(f"ℹ️  [VOICE] Activation sound not found: {path}", flush=True)
+            return False
+
+        import shutil
+
+        if not shutil.which("afplay"):
+            print("ℹ️  [VOICE] Cannot play activation sound: afplay unavailable", flush=True)
+            return False
+
+        try:
+            volume = os.getenv("JARVIS_ACTIVATION_SOUND_VOLUME", "0.65")
+            process = await asyncio.create_subprocess_exec(
+                "afplay",
+                "-v",
+                volume,
+                str(path),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await process.wait()
+            return process.returncode == 0
+        except Exception as e:
+            print(f"⚠️  [VOICE] Activation sound playback failed: {e}", flush=True)
+            return False
+
+    async def _speak_activation_text(self, text: str) -> None:
+        if not text:
+            return
+
+        if self.session is None and not await self._wait_for_session_ready(timeout=5.0):
+            print("ℹ️  [VOICE] Activation speech skipped: realtime session not ready", flush=True)
+            return
+
+        if self.session is not None:
+            await self.session._speak_direct_text(text)
+
+    async def _build_activation_summary(self) -> str:
+        try:
+            startup_task = (
+                "Produce a very short startup briefing for the user. Keep it to 2-4 "
+                "short spoken sentences. Cover the current day, the next 24 hours, "
+                "urgent calendar items, unread or actionable mail, and any important "
+                "notes or reminders that change the startup picture. Do not use "
+                "headings or a preface."
+            )
+            context_parts: list[str] = ["This is the JARVIS startup sequence."]
+
+            try:
+                settings = get_settings()
+                speaker_verification_enabled = bool(settings.speaker_verification_enabled)
+            except Exception:
+                speaker_verification_enabled = self._speaker_verifier is not None
+
+            if self.session and getattr(self.session, "_ws_alive", None) and self.session._ws_alive():
+                context_parts.append("The realtime connection is online.")
+            elif self.session:
+                context_parts.append("The realtime connection is still coming online.")
+            else:
+                context_parts.append("The realtime session is still starting.")
+
+            if speaker_verification_enabled:
+                verifier = self._get_speaker_verifier()
+                profile_path = getattr(verifier, "profile_path", None) if verifier is not None else None
+                if verifier is not None and profile_path is not None and getattr(profile_path, "exists", lambda: False)():
+                    context_parts.append("Speaker verification is ready.")
+                else:
+                    context_parts.append("Speaker verification is enabled, but no profile is enrolled yet.")
+            else:
+                context_parts.append("Speaker verification is not enabled.")
+
+            voice = self._activation_voice_settings()
+            if voice["clapEnabled"]:
+                context_parts.append("Clap and wake word are armed.")
+            else:
+                context_parts.append("Wake word is armed.")
+
+            if voice["announceCalendar"]:
+                context_parts.append("Calendar details are allowed in the startup summary.")
+
+            result = await REGISTRY.call(
+                "delegate_to_startup_briefing",
+                {
+                    "task": startup_task,
+                    "context": " ".join(context_parts),
+                },
+            )
+            if result.get("ok"):
+                summary = str(result.get("result") or "").strip()
+                if summary:
+                    return summary
+                print("ℹ️  [VOICE] Startup briefing agent returned no text; using fallback summary", flush=True)
+            else:
+                print(
+                    f"ℹ️  [VOICE] Startup briefing agent failed: {result.get('error', 'unknown error')}; using fallback summary",
+                    flush=True,
+                )
+        except Exception as e:
+            print(f"⚠️  [VOICE] Startup briefing agent lookup failed: {e}; using fallback summary", flush=True)
+
+        return self._build_activation_summary_fallback()
+
+    async def _build_activation_summary_fallback(self) -> str:
+        voice = self._activation_voice_settings()
+        try:
+            settings = get_settings()
+            speaker_verification_enabled = bool(settings.speaker_verification_enabled)
+        except Exception:
+            speaker_verification_enabled = self._speaker_verifier is not None
+
+        parts: list[str] = []
+
+        if self.session and getattr(self.session, "_ws_alive", None) and self.session._ws_alive():
+            parts.append("Connections are online.")
+        elif self.session:
+            parts.append("The realtime connection is coming online.")
+        else:
+            parts.append("The realtime session is still starting.")
+
+        if speaker_verification_enabled:
+            verifier = self._get_speaker_verifier()
+            profile_path = getattr(verifier, "profile_path", None) if verifier is not None else None
+            if verifier is not None and profile_path is not None and getattr(profile_path, "exists", lambda: False)():
+                parts.append("Speaker verification is ready.")
+            else:
+                parts.append("Speaker verification is enabled, but no profile is enrolled yet.")
+        else:
+            parts.append("Speaker verification is not enabled.")
+
+        if voice["clapEnabled"]:
+            parts.append("Clap and wake word are armed.")
+        else:
+            parts.append("Wake word is armed.")
+
+        if voice["announceCalendar"]:
+            try:
+                result = await asyncio.wait_for(REGISTRY.call("calendar_list", {"max_results": 3}), timeout=1.5)
+                if result.get("ok"):
+                    calendar_summary = self._summarize_calendar_output(str(result.get("result") or ""))
+                    if calendar_summary:
+                        parts.append(calendar_summary)
+            except asyncio.TimeoutError:
+                print("ℹ️  [VOICE] Calendar summary timed out; speaking status without events", flush=True)
+            except Exception as e:
+                print(f"⚠️  [VOICE] Calendar summary failed: {e}", flush=True)
+
+        return " ".join(parts)
+
+    def _trigger_activation_sequence(self, trigger: str) -> None:
+        if self._activation_sequence_running:
+            return
+        if not self.event_loop:
+            print(f"ℹ️  [VOICE] Activation trigger ignored: event loop not ready ({trigger})", flush=True)
+            return
+
+        self._activation_sequence_running = True
+        future = asyncio.run_coroutine_threadsafe(self._run_activation_sequence(trigger), self.event_loop)
+
+        def _release(_future):
+            self._activation_sequence_running = False
+
+        future.add_done_callback(_release)
+
+    async def _run_activation_sequence(self, trigger: str) -> None:
+        try:
+            voice = self._activation_voice_settings()
+            intro_sound_path = voice["introSoundPath"]
+            intro_duration_seconds = 3.0
+            self._native_voice_cooldown_until = time.time() + 3.0
+            self._native_clap_cooldown_until = time.time() + 2.0
+            self._native_voice_armed = False
+            self._native_recording_has_speech = False
+            self._recording_audio_buffer = []
+            self._audio_chunk_count = 0
+            self._total_audio_sent = 0
+            self._native_speech_streak = 0
+            self._native_pre_roll_audio.clear()
+            self._native_listening_window_until = time.time() + 300.0
+            if self.bridge:
+                self.bridge.set_recording_state(False)
+
+            summary_task = None
+            if voice["announceStatus"]:
+                summary_task = asyncio.create_task(self._build_activation_summary())
+
+            sound_task = None
+            if intro_sound_path:
+                sound_task = asyncio.create_task(self._play_activation_sound(intro_sound_path))
+
+            if summary_task is not None or sound_task is not None:
+                await asyncio.sleep(0)
+
+            if self.session is None and not await self._wait_for_session_ready(timeout=5.0):
+                print(f"ℹ️  [VOICE] Activation sequence skipped speech: session not ready ({trigger})", flush=True)
+                if sound_task is not None:
+                    await sound_task
+                if summary_task is not None:
+                    await summary_task
+                return
+
+            if voice["activationGreeting"]:
+                await self._speak_activation_text(voice["activationGreeting"])
+
+            if sound_task is not None:
+                await sound_task
+
+            if voice["announceStatus"]:
+                if summary_task is not None:
+                    activation_summary = await summary_task
+                else:
+                    activation_summary = await self._build_activation_summary()
+                if activation_summary:
+                    await self._speak_activation_text(activation_summary)
+        finally:
+            self._activation_sequence_running = False
+
+    def _trigger_activation_sequence(self, trigger: str) -> None:
+        if self._activation_sequence_running:
+            return
+        if not self.event_loop:
+            print(f"ℹ️  [VOICE] Activation trigger ignored: event loop not ready ({trigger})", flush=True)
+            return
+
+        self._activation_sequence_running = True
+        future = asyncio.run_coroutine_threadsafe(self._run_activation_sequence(trigger), self.event_loop)
+
+        def _release(_future):
+            self._activation_sequence_running = False
+
+        future.add_done_callback(_release)
+
+    def _detect_clap_trigger(self, frame_energy: float) -> bool:
+        voice = self._activation_voice_settings()
+        if not voice["enabled"] or not voice["clapEnabled"]:
+            return False
+
+        now = time.time()
+        if now < self._native_clap_cooldown_until:
+            return False
+        if self.bridge and self.bridge.is_speaking:
+            return False
+
+        spike_threshold = max(0.08, self._native_background_energy * 5.0)
+        if frame_energy < spike_threshold:
+            return False
+
+        if self._native_last_frame_energy > frame_energy * 0.8:
+            return False
+
+        self._native_clap_cooldown_until = now + 1.2
+        return True
+
+    def _should_ignore_trigger(self) -> bool:
+        return bool(self.bridge and self.bridge.is_speaking)
 
     @staticmethod
     def _native_silence_timeout(recording_duration: float) -> float:
@@ -328,6 +664,17 @@ class JarvisWebSocketApp:
                 music_override_active = now < self._native_music_override_until
                 music_blocks_passive = music_playing and not music_override_active
 
+                if self._activation_sequence_running:
+                    self._send_voice_debug(
+                        status="activation_sequence",
+                        armed=self._native_voice_armed,
+                        music_playing=music_playing,
+                        allow_passive_followup=False,
+                        skip_reason="Activation sequence running",
+                    )
+                    time.sleep(0.05)
+                    continue
+
                 if self.bridge and self.bridge.is_speaking:
                     self._trace_native_voice_skip("JARVIS is speaking")
                     self._send_voice_debug(
@@ -457,10 +804,26 @@ class JarvisWebSocketApp:
                     is_start_speech_frame = frame_energy >= speech_start_threshold
 
                     if not self._native_voice_armed and not allow_passive_followup:
+                        if self._detect_clap_trigger(frame_energy):
+                            print("👏 [VOICE] Clap detected — activating assistant", flush=True)
+                            self._send_voice_debug(
+                                status="clap_detected",
+                                armed=False,
+                                music_playing=music_playing,
+                                allow_passive_followup=False,
+                                skip_reason="Clap trigger detected",
+                            )
+                            if music_playing:
+                                self._native_music_override_until = time.time() + 8.0
+                            self._trigger_activation_sequence("clap")
+                            self._native_last_frame_energy = frame_energy
+                            continue
+
                         try:
                             wake_model.predict(audio)
                         except Exception as e:
                             print(f"⚠️  [VOICE] Wake prediction failed: {e}", flush=True)
+                            self._native_last_frame_energy = frame_energy
                             time.sleep(0.1)
                             continue
 
@@ -477,21 +840,22 @@ class JarvisWebSocketApp:
 
                         best_model, best_score = max(wake_scores, key=lambda item: item[1], default=("", 0.0))
                         if best_model and best_score >= activation_threshold:
-                            self._native_voice_last_activity = time.time()
-                            self._native_recording_started_at = time.time()
-                            self._native_recording_has_speech = False
-                            self._recording_audio_buffer = []
-                            self._audio_chunk_count = 0
-                            self._total_audio_sent = 0
-                            self._native_listening_window_until = time.time() + listen_window_seconds
-                            self._native_pre_roll_audio.clear()
+                            print(f"🟢 [VOICE] Wake word detected: {best_model}={best_score:.2f} — activating assistant", flush=True)
+                            self._send_voice_debug(
+                                status="wake_word_detected",
+                                armed=False,
+                                music_playing=music_playing,
+                                allow_passive_followup=False,
+                                skip_reason="Wake word trigger detected",
+                            )
                             if music_playing:
                                 self._native_music_override_until = time.time() + 8.0
                                 print("🔓 [VOICE] Wake word heard during music — enabling temporary mic override", flush=True)
-                            print(f"🟢 [VOICE] Wake word detected: {best_model}={best_score:.2f} — listening window open for 5 min", flush=True)
-                            self._set_voice_status("connected", "Wake word detected — listening for your request (5 min window)")
+                            self._trigger_activation_sequence("wake_word")
+                            self._native_last_frame_energy = frame_energy
                             continue
 
+                        self._native_last_frame_energy = frame_energy
                         continue
 
                     if not self._native_voice_armed and allow_passive_followup:
@@ -574,6 +938,8 @@ class JarvisWebSocketApp:
                         print("🟡 [VOICE] Listening window extended — next 5 min no wake word needed", flush=True)
                         self._set_voice_status("connected", "Listening window active — speak your command")
 
+                    self._native_last_frame_energy = frame_energy
+
                 except Exception as e:
                     print(f"⚠️  [VOICE] Native iteration error: {e}", flush=True)
                     import traceback
@@ -614,14 +980,15 @@ class JarvisWebSocketApp:
             host="localhost",
             port=8000
         )
+
+        self._start_session()
         
         import time
         time.sleep(0.5)
 
-        self._start_speaker_verifier_warmup()
         self._start_native_voice_listener()
-        
-        self._start_session()
+
+        self._start_speaker_verifier_warmup()
 
         self.audio_thread = threading.Thread(target=self._audio_player_thread, daemon=True)
         self.audio_thread.start()

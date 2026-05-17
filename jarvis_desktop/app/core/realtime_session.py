@@ -547,6 +547,7 @@ class RealtimeSession:
                     "input": text,
                     "response_format": "mp3",
                 }
+                playback_volume = os.getenv("JARVIS_DIRECT_SPEECH_VOLUME", "1.15")
 
                 async with httpx.AsyncClient(timeout=90.0) as client:
                     response = await client.post(
@@ -567,6 +568,8 @@ class RealtimeSession:
                     if shutil.which("afplay"):
                         process = await asyncio.create_subprocess_exec(
                             "afplay",
+                            "-v",
+                            playback_volume,
                             audio_path,
                             stdout=asyncio.subprocess.DEVNULL,
                             stderr=asyncio.subprocess.DEVNULL,
@@ -580,8 +583,11 @@ class RealtimeSession:
                     except Exception:
                         pass
             elif sys.platform == "darwin" and shutil.which("say"):
+                say_voice = os.getenv("JARVIS_DIRECT_SPEECH_VOICE", "Daniel").strip() or "Daniel"
                 process = await asyncio.create_subprocess_exec(
                     "say",
+                    "-v",
+                    say_voice,
                     text,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,

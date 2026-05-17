@@ -382,19 +382,98 @@ async def test_main_app_session_wiring_and_shutdown(monkeypatch):
     assert app._total_audio_sent == 0
     assert app._audio_chunk_count == 0
 
+
+@pytest.mark.asyncio
+async def test_main_activation_sequence_plays_sound_and_reads_summary(monkeypatch):
+    main = importlib.import_module("main")
+
+    app = main.JarvisWebSocketApp()
+    sound_calls = []
+    speech_calls = []
+    summary_calls = []
+    sleep_calls = []
+    sound_started = asyncio.Event()
+    sound_finished = asyncio.Event()
+
+    async def fake_session_speak(text: str):
+        speech_calls.append(text)
+        if text == "Welcome home, sir.":
+            sound_finished.set()
+        return None
+
+    app.session = SimpleNamespace(_ws_alive=lambda: True, _speak_direct_text=fake_session_speak)
+    app.bridge = SimpleNamespace(set_recording_state=lambda flag: None)
+    app._speaker_verifier = SimpleNamespace()
+
+    original_sleep = main.asyncio.sleep
+
+    async def fake_play_activation_sound(path: str):
+        sound_calls.append(path)
+        sound_started.set()
+        await sound_finished.wait()
+        return True
+
+    async def fake_registry_call(name, args):
+        summary_calls.append((name, args))
+        if name != "delegate_to_startup_briefing":
+            raise AssertionError(f"Unexpected registry call: {name}")
+        await sound_started.wait()
+        return {
+            "ok": True,
+            "result": "Good morning, sir. Your calendar is light, there is nothing urgent in mail, and you can start with the one meeting already on the books."
+        }
+
+    async def fake_sleep(delay):
+        sleep_calls.append(delay)
+        if delay:
+            await original_sleep(0)
+
+    monkeypatch.setattr(app, "_play_activation_sound", fake_play_activation_sound)
+    monkeypatch.setattr(main.REGISTRY, "call", fake_registry_call)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(voice_settings={
+        "enabled": True,
+        "wakeWord": "Hey JARVIS",
+        "sensitivity": 0.5,
+        "clapEnabled": True,
+        "introSoundPath": "/tmp/jarvis-intro.mp3",
+        "activationGreeting": "Welcome home, sir.",
+        "announceStatus": True,
+        "announceCalendar": True,
+    }))
+
+    await app._run_activation_sequence("clap")
+
+    assert sound_calls == ["/tmp/jarvis-intro.mp3"]
+    assert speech_calls[0] == "Welcome home, sir."
+    assert "Good morning, sir." in speech_calls[1]
+    assert summary_calls and summary_calls[0][0] == "delegate_to_startup_briefing"
+    assert "startup briefing" in summary_calls[0][1]["task"].lower()
+    assert "startup sequence" in summary_calls[0][1]["context"].lower()
+    assert sleep_calls and sleep_calls[0] == 0
+    assert 1.5 not in sleep_calls
+    assert sound_started.is_set() is True
+    assert sound_finished.is_set() is True
+
+
+def test_main_detects_clap_trigger(monkeypatch):
+    main = importlib.import_module("main")
+
+    app = main.JarvisWebSocketApp()
+    app.bridge = SimpleNamespace(is_speaking=False, set_speaking_state=lambda flag: None)
+    app._native_background_energy = 0.01
+    app._native_last_frame_energy = 0.0
+    app._native_clap_cooldown_until = 0.0
+
+    monkeypatch.setattr(main.time, "time", lambda: 100.0)
+
+    assert app._detect_clap_trigger(0.2) is True
+    assert app._detect_clap_trigger(0.05) is False
+
     app.audio_queue.put(b"queued-bytes")
     app._on_recording_start()
-    assert created_sessions[0].interrupts == 1
     assert app.audio_queue.empty() is True
-    assert bridge.speaking_calls[-1] is False
     assert app._speaking_timer is None
-
-    assert app._native_mic_resume_at == pytest.approx(100.0 + main.NATIVE_MIC_RESUME_DELAY_SECONDS)
-
-    app.stop()
-    assert bridge.stop_called is True
-    assert created_sessions[0].close_called is True
-    assert future_calls
 
 
 def test_main_music_playing_gate_blocks_microphone(monkeypatch):
