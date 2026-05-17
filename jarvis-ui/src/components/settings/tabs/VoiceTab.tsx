@@ -299,6 +299,59 @@ export function VoiceTab() {
           />
           <span className="range-value">{settings.settings.voice.sensitivity}</span>
         </div>
+
+        <div className="form-group">
+          <label>Activation behavior</label>
+          <label className="checkbox toggle" style={{ marginBottom: '0.5rem' }}>
+            <input
+              type="checkbox"
+              checked={settings.settings.voice.clapEnabled}
+              onChange={e => settings.updateVoice({ clapEnabled: e.target.checked })}
+            />
+            <span className="toggle-slider"></span>
+            Enable clap to wake
+          </label>
+
+          <input
+            type="text"
+            value={settings.settings.voice.introSoundPath}
+            onChange={e => settings.updateVoice({ introSoundPath: e.target.value })}
+            placeholder="/Users/you/Music/jarvis-intro.mp3"
+            style={{ marginBottom: '0.75rem' }}
+          />
+
+          <input
+            type="text"
+            value={settings.settings.voice.activationGreeting}
+            onChange={e => settings.updateVoice({ activationGreeting: e.target.value })}
+            placeholder="Welcome home, sir."
+            style={{ marginBottom: '0.75rem' }}
+          />
+
+          <label className="checkbox toggle" style={{ marginBottom: '0.5rem' }}>
+            <input
+              type="checkbox"
+              checked={settings.settings.voice.announceStatus}
+              onChange={e => settings.updateVoice({ announceStatus: e.target.checked })}
+            />
+            <span className="toggle-slider"></span>
+            Announce connection and system status
+          </label>
+
+          <label className="checkbox toggle">
+            <input
+              type="checkbox"
+              checked={settings.settings.voice.announceCalendar}
+              onChange={e => settings.updateVoice({ announceCalendar: e.target.checked })}
+            />
+            <span className="toggle-slider"></span>
+            Read the next calendar items after activation
+          </label>
+
+          <p className="section-desc" style={{ marginTop: '0.75rem' }}>
+            Use a local audio file for the intro sound. The backend plays it with `afplay` on macOS, so point this to a file on your machine.
+          </p>
+        </div>
       </section>
 
       <section className="settings-section">

@@ -111,7 +111,7 @@ Settings are persisted to `~/.jarvis/settings.json` via the backend:
 - **Personal Info** - Name, default location, timezone
 - **Integrations** - Google OAuth, Tavily API key, Qdrant settings
 - **Obsidian Vault** - Path for knowledge base sync
-- **Voice tab** - Speaker verification enrollment, profile status, and profile clearing
+- **Voice tab** - Speaker verification enrollment, profile status, profile clearing, clap-to-wake, and activation greeting/intro sound controls
 
-The Voice tab uploads or records sample speech, then sends it to the backend to create or replace the speaker profile. When a profile is saved, the backend refreshes its in-memory cache automatically.
+The Voice tab uploads or records sample speech, then sends it to the backend to create or replace the speaker profile. When a profile is saved, the backend refreshes its in-memory cache automatically. You can also point the activation sound setting at a local audio file if you want a short startup sting before JARVIS speaks.
 

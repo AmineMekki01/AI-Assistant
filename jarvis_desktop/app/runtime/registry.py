@@ -203,6 +203,7 @@ _ACTION_MODULES = (
 _AGENT_MODULES: tuple[str, ...] = (
     "app.agents.research",
     "app.agents.briefing",
+    "app.agents.startup_briefing",
     "app.agents.workspace",
 )
 

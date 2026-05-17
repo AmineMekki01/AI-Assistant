@@ -77,6 +77,11 @@ export interface Settings {
     enabled: boolean
     wakeWord: string
     sensitivity: number
+    clapEnabled: boolean
+    introSoundPath: string
+    activationGreeting: string
+    announceStatus: boolean
+    announceCalendar: boolean
   }
 }
 
@@ -130,7 +135,12 @@ const defaultSettings: Settings = {
   voice: {
     enabled: true,
     wakeWord: 'Hey JARVIS',
-    sensitivity: 0.5
+    sensitivity: 0.5,
+    clapEnabled: true,
+    introSoundPath: '',
+    activationGreeting: 'Welcome home, sir.',
+    announceStatus: true,
+    announceCalendar: true
   }
 }
 
@@ -139,7 +149,19 @@ const STORAGE_KEY = 'jarvis_settings'
 export function useSettings() {
   const [settings, setSettings] = useState<Settings>(() => {
     const stored = localStorage.getItem(STORAGE_KEY)
-    return stored ? { ...defaultSettings, ...JSON.parse(stored) } : defaultSettings
+    if (!stored) {
+      return defaultSettings
+    }
+
+    const parsed = JSON.parse(stored) as Partial<Settings>
+    return {
+      ...defaultSettings,
+      ...parsed,
+      voice: {
+        ...defaultSettings.voice,
+        ...parsed.voice
+      }
+    }
   })
   
   const [isLoading, setIsLoading] = useState(false)
@@ -561,7 +583,14 @@ export function useSettings() {
       if (response.ok) {
         const data = await response.json()
         if (data && Object.keys(data).length > 0) {
-          setSettings(prev => ({ ...prev, ...data }))
+          setSettings(prev => ({
+            ...prev,
+            ...data,
+            voice: {
+              ...prev.voice,
+              ...(data.voice ?? {})
+            }
+          }))
         }
         return data
       }

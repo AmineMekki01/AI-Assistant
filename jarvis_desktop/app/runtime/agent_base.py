@@ -309,7 +309,7 @@ class Agent:
         return result
 
 def _default_model() -> str:
-    return os.getenv("OPENAI_AGENT_MODEL", "gpt-5.4")
+    return os.getenv("OPENAI_AGENT_MODEL", "gpt-5.4-nano")
 
 
 def _preview(value: Any, limit: int = 200) -> str:

@@ -43,8 +43,8 @@ Open http://localhost:5173 and start talking.
 | Feature | What it does |
 |---------|-------------|
 | 🎤 Realtime voice | Streams PCM16 audio to OpenAI's Realtime API |
-| �️ Speaker verification | Optional voice enrollment and cached verification on startup |
-| �📧 Mail | Unified Gmail + Zimbra/OVH (one tool, fan-out) |
+| 🗣️ Speaker verification | Optional voice enrollment, cached verification, and wake word + clap activation |
+| 📧 Mail | Unified Gmail + Zimbra/OVH (one tool, fan-out) |
 | 📅 Calendar | Unified Google + Apple Calendar |
 | 🎵 Apple Music | AppleScript control with UI-automation fallback |
 | 📚 Knowledge | Obsidian vault RAG via Qdrant |
