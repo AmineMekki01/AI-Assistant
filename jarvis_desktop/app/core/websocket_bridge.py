@@ -224,11 +224,14 @@ class WebSocketBridge:
     async def _process_recorded_audio(self):
         """Commit audio buffer and create response."""
         print(f"🔔 _process_recorded_audio called, has _on_commit: {hasattr(self, '_on_commit')}")
-        if self._on_commit:
-            print("🔔 Calling _on_commit callback...")
-            self._on_commit()
-        else:
+        if not self._on_commit:
             print("⚠️  _on_commit callback not set!")
+            return
+        if not hasattr(self, '_chunk_count') or self._chunk_count == 0:
+            print("⚠️  No audio chunks recorded, skipping commit")
+            return
+        print("🔔 Calling _on_commit callback...")
+        self._on_commit()
             
     def _float_to_pcm16(self, audio_array: np.ndarray) -> bytes:
         """Convert float32 audio to PCM16 bytes."""

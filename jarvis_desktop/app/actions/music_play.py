@@ -9,6 +9,7 @@ import time
 from typing import Optional
 
 from ..core.logging import StructuredLog
+from ..core import music_state
 from ..runtime import action
 from ..services import itunes as itunes_svc
 from ..tools import music_library as lib
@@ -62,6 +63,10 @@ async def _play_from_library(query: str) -> Optional[str]:
     if played is None:
         return None
     return f"Now playing: {played['name']} by {played['artist']}"
+
+
+def _arm_voice_followup_override() -> None:
+    music_state.set_voice_followup_override(duration_seconds=8.0)
 
 async def _wait_for_playing_track(expected_name: str, timeout_s: float = 4.0) -> Optional[str]:
     expected = expected_name.strip().lower()
@@ -156,21 +161,26 @@ async def computer_play_music(query: str = "", database_id: Optional[str] = None
     if database_id:
         played = await lib.play_by_database_id(database_id)
         if played is not None:
+            _arm_voice_followup_override()
             return f"Now playing: {played['name']} by {played['artist']}"
         log.info("music.play_by_id.miss", db_id=database_id)
 
     if not query:
         proc = await _run_osascript('tell application "Music" to playpause')
         if proc.returncode == 0:
+            if music_state.is_music_playing(force_refresh=True):
+                _arm_voice_followup_override()
             return "Toggled Apple Music playback."
         return f"Error: {proc.stderr.strip() or 'Music control failed'}"
 
     from_lib = await _play_from_library(query)
     if from_lib is not None:
+        _arm_voice_followup_override()
         return from_lib
 
     from_cat = await _play_from_catalog(query)
     if from_cat is not None:
+        _arm_voice_followup_override()
         return from_cat
 
     log.info("music.not_found", query=query)

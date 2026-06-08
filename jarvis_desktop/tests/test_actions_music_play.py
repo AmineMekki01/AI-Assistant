@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.actions import music_play as music_action
+from app.core import music_state
 from app.services import itunes as itunes_svc
 from app.tools import music_library as lib
 
@@ -113,9 +114,17 @@ async def test_music_play_routes_library_database_id_toggle_and_outer_error(monk
         return "Catalog Song"
 
     monkeypatch.setattr(music_action, "_wait_for_playing_track", wait_catalog_ok)
+    override_calls = []
+
+    def fake_set_voice_followup_override(duration_seconds=8.0):
+        override_calls.append(duration_seconds)
+
+    monkeypatch.setattr(music_state, "set_voice_followup_override", fake_set_voice_followup_override)
+    monkeypatch.setattr(music_state, "is_music_playing", lambda force_refresh=False: True)
     assert await music_action.computer_play_music(query="catalog hit") == (
         "Now playing from Apple Music: Catalog Song by Artist C"
     )
+    assert override_calls == [8.0]
     assert await music_action.computer_play_music(query="missing", database_id="999") == (
         "Error: I couldn't find 'missing' in your Apple Music library or the Apple Music catalog."
     )

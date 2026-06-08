@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -171,39 +172,12 @@ class Agent:
                 )
                 return choice.content or "(the agent produced no answer)"
 
-            for tc in tool_calls:
-                tool_name = tc.function.name
-                tools_called.append(tool_name)
+            tools_called.extend(tc.function.name for tc in tool_calls)
+            results = await asyncio.gather(
+                *(self._execute_tool_call(tc) for tc in tool_calls)
+            )
 
-                if tool_name not in self.tools:
-                    output = (
-                        f"Error: tool '{tool_name}' is not in this agent's "
-                        "allowed tool set."
-                    )
-                    log.warning(
-                        "agent.tool_denied",
-                        agent=self.name, tool=tool_name,
-                    )
-                else:
-                    try:
-                        args = json.loads(tc.function.arguments or "{}")
-                    except json.JSONDecodeError:
-                        args = {}
-
-                    result = await REGISTRY.call(tool_name, args)
-                    if result.get("ok"):
-                        payload = result.get("result")
-                        output = (
-                            json.dumps(payload, ensure_ascii=False, default=str)
-                            if isinstance(payload, (dict, list))
-                            else str(payload)
-                        )
-                    else:
-                        output = f"Error: {result.get('error', 'unknown error')}"
-
-                if len(output) > self.max_tool_output_chars:
-                    output = output[: self.max_tool_output_chars] + "…(truncated)"
-
+            for tc, output in results:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -243,6 +217,51 @@ class Agent:
                 "The agent exhausted its iteration budget and failed to "
                 f"produce a final answer ({e})."
             )
+
+    async def _execute_tool_call(self, tc) -> tuple[Any, str]:
+        """Resolve one tool call, returning the original call and formatted output."""
+        tool_name = tc.function.name
+
+        if tool_name not in self.tools:
+            output = (
+                f"Error: tool '{tool_name}' is not in this agent's "
+                "allowed tool set."
+            )
+            log.warning(
+                "agent.tool_denied",
+                agent=self.name, tool=tool_name,
+            )
+            return tc, output
+
+        try:
+            args = json.loads(tc.function.arguments or "{}")
+        except json.JSONDecodeError:
+            args = {}
+
+        try:
+            result = await REGISTRY.call(tool_name, args)
+            if result.get("ok"):
+                payload = result.get("result")
+                output = (
+                    json.dumps(payload, ensure_ascii=False, default=str)
+                    if isinstance(payload, (dict, list))
+                    else str(payload)
+                )
+            else:
+                output = f"Error: {result.get('error', 'unknown error')}"
+        except Exception as e:
+            log.error(
+                "agent.tool_call_failed",
+                agent=self.name,
+                tool=tool_name,
+                error=str(e),
+            )
+            output = f"Error: tool '{tool_name}' failed ({e})."
+
+        if len(output) > self.max_tool_output_chars:
+            output = output[: self.max_tool_output_chars] + "…(truncated)"
+
+        return tc, output
 
     async def _maybe_prime_memory(self, task: str) -> str:
         """Inject relevant memories into system prompt for self-referential tasks.

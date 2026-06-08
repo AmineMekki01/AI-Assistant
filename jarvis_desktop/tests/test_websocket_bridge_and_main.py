@@ -82,6 +82,9 @@ class FakeSession:
     async def interrupt_active_response(self):
         self.interrupts += 1
 
+    async def speak(self, text: str, *, await_completion: bool = True, timeout: float = 90.0) -> None:
+        pass
+
 
 @pytest.mark.asyncio
 async def test_websocket_bridge_recording_audio_and_message_paths(monkeypatch):
@@ -384,6 +387,55 @@ async def test_main_app_session_wiring_and_shutdown(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_main_routes_user_transcript_through_orchestrator(monkeypatch):
+    main = importlib.import_module("main")
+
+    app = main.JarvisWebSocketApp()
+    spoken = []
+    transcript_calls = []
+    status_calls = []
+    scheduled_tasks = []
+
+    async def fake_speak(text: str, *, await_completion: bool = True, timeout: float = 90.0) -> None:
+        spoken.append(text)
+
+    async def fake_orchestrator_handle(text, *, context="", on_event=None):
+        return f"Orchestrator reply to: {text}"
+
+    def fake_run_coroutine_threadsafe(coro, loop):
+        task = asyncio.create_task(coro)
+        scheduled_tasks.append(task)
+        return SimpleNamespace(add_done_callback=lambda callback: task.add_done_callback(callback))
+
+    monkeypatch.setattr(main.asyncio, "run_coroutine_threadsafe", fake_run_coroutine_threadsafe)
+
+    app.session = SimpleNamespace(speak=fake_speak)
+    app.event_loop = object()
+    app.bridge = SimpleNamespace(
+        send_status=lambda state, message: status_calls.append((state, message)),
+        send_transcript=lambda role, text: transcript_calls.append((role, text)),
+        send_mail_draft=lambda draft: None,
+    )
+
+    monkeypatch.setattr(app.orchestrator, "handle", fake_orchestrator_handle)
+
+    app._on_transcript("user", "What is the price of Bitcoin right now?")
+
+    await asyncio.gather(*scheduled_tasks)
+
+    assert transcript_calls == [
+        ("user", "What is the price of Bitcoin right now?"),
+        ("assistant", "Orchestrator reply to: What is the price of Bitcoin right now?"),
+    ]
+    assert spoken == ["Orchestrator reply to: What is the price of Bitcoin right now?"]
+    assert status_calls == [
+        ("connected", "Thinking…"),
+        ("connected", "J.A.R.V.I.S. SYSTEM ONLINE"),
+    ]
+    assert app._orchestrator_turn_in_progress is False
+
+
+@pytest.mark.asyncio
 async def test_main_activation_sequence_plays_sound_and_reads_summary(monkeypatch):
     main = importlib.import_module("main")
 
@@ -401,7 +453,7 @@ async def test_main_activation_sequence_plays_sound_and_reads_summary(monkeypatc
             sound_finished.set()
         return None
 
-    app.session = SimpleNamespace(_ws_alive=lambda: True, _speak_direct_text=fake_session_speak)
+    app.session = SimpleNamespace(_ws_alive=lambda: True, speak=fake_session_speak)
     app.bridge = SimpleNamespace(set_recording_state=lambda flag: None)
     app._speaker_verifier = SimpleNamespace()
 

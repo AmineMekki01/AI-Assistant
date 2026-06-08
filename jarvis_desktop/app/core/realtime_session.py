@@ -312,8 +312,14 @@ for detail.
       the dentist tomorrow". If the workspace agent returns a line starting
       with "Proposed action:", read it to the user, ask for confirmation,
       then execute via `mail_send` / `calendar_create` yourself.
-    - Do NOT delegate single-source lookups - `web_search`, `knowledge_ask`,
-      `memory_recall`, `mail_list`, `calendar_list` etc. are faster direct.
+  • Live public facts: for anything current or time-sensitive outside the user's
+    private calendar/mail/notes — especially bitcoin/crypto prices, stock prices,
+    weather, news, exchange rates, and other "latest" questions — ALWAYS call
+    `web_search` before answering. Do not answer from memory, and do not say
+    "I'll check" unless the tool call has already been sent. If the search comes
+    back empty or unclear, say that honestly.
+  • Do NOT delegate single-source lookups - `web_search`, `knowledge_ask`,
+    `memory_recall`, `mail_list`, `calendar_list` etc. are faster direct.
   • If a request can't be satisfied with the available tools, say so briefly -
     there is no generic UI-automation fallback. Don't pretend to perform
     actions you can't actually execute.
@@ -322,6 +328,21 @@ Always respond in English, regardless of what language the user speaks.
 """
 
     return persona
+
+
+def _voice_layer_instructions() -> str:
+    """System prompt for the Realtime model when it is used as a pure voice layer.
+
+    The orchestrator does all of the thinking and hands finished text to
+    :meth:`RealtimeSession.speak`. The Realtime model's only job is to read that
+    text aloud verbatim in the JARVIS voice, so the prompt is deliberately tiny.
+    """
+    return (
+        "You are the voice of J.A.R.V.I.S., a calm, composed, articulate British "
+        "AI butler. You are a text-to-speech surface only: read the provided text "
+        "aloud exactly as written, in that voice. Never add words, never omit "
+        "words, never answer or comment on your own. Do not call tools."
+    )
 
 
 def _parse_mail_draft_preview(output: str) -> dict[str, Any] | None:
@@ -381,14 +402,21 @@ class RealtimeSession:
         self.response_buffer = ""
         self.has_responded = False
         self._response_active = False
+        self._response_audio_seen = False
         self._last_response_create_at: float = 0.0
         self._push_to_queue = True
         self._commit_ack_event: Optional[asyncio.Event] = None
+        self._response_done_event: Optional[asyncio.Event] = None
+        self._speak_lock: Optional[asyncio.Lock] = None
+        self._speak_active: bool = False
+        self._input_buffer_committed: bool = False
+        self._auto_response_pending: bool = False
 
     def reset_turn(self) -> None:
         """Reset the assistant turn state without touching the socket."""
         self.has_responded = False
         self.response_buffer = ""
+        self._response_audio_seen = False
 
     async def interrupt_active_response(self) -> None:
         """Cancel any in-progress assistant response when the user starts speaking."""
@@ -410,7 +438,6 @@ class RealtimeSession:
         
         headers = [
             ("Authorization", f"Bearer {self.api_key}"),
-            ("OpenAI-Beta", "realtime=v1"),
         ]
         
         self.ws = await websockets.connect(
@@ -424,6 +451,8 @@ class RealtimeSession:
         log.info("realtime.connected")
         self._reset_runtime_state()
         self._commit_ack_event = asyncio.Event()
+        self._response_done_event = asyncio.Event()
+        self._speak_lock = asyncio.Lock()
         self._pump_task = asyncio.create_task(self._pump(), name="realtime-pump")
     
     async def configure(self) -> None:
@@ -471,22 +500,44 @@ class RealtimeSession:
         if transcription_prompt:
             input_audio_transcription["prompt"] = transcription_prompt
 
-        session = {
-            "modalities": ["audio", "text"],
-            "voice": app_settings.openai_realtime_voice,
-            "instructions": get_jarvis_persona(),
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "input_audio_transcription": input_audio_transcription,
+        session: dict[str, Any] = {
+            "type": "realtime",
+            "model": app_settings.openai_realtime_model,
+            "instructions": _voice_layer_instructions(),
+            "output_modalities": ["audio"],
+            "audio": {
+                "input": {
+                    "format": {
+                        "type": "audio/pcm",
+                        "rate": 16000,
+                    },
+                    "transcription": input_audio_transcription,
+                },
+                "output": {
+                    "format": {
+                        "type": "audio/pcm",
+                        "rate": 24000,
+                    },
+                    "voice": app_settings.openai_realtime_voice,
+                    "speed": 1,
+                },
+            },
             "turn_detection": None,
-            "tool_choice": "auto",
+            "tool_choice": "none",
             "temperature": 0.6,
         }
-        if realtime_tools:
-            session["tools"] = realtime_tools
         return {
             "type": "session.update",
             "session": session,
+        }
+
+    def _build_response_create_event(self) -> dict[str, Any]:
+        return {
+            "type": "response.create",
+            "response": {
+                "conversation": "auto",
+                "output_modalities": ["audio"],
+            },
         }
 
     def _log_tool_catalog(self, realtime_tools: list[dict[str, Any]]) -> None:
@@ -520,87 +571,75 @@ class RealtimeSession:
             return json.dumps(output_data, ensure_ascii=False, default=str)
         return str(output_data)
 
-    async def _speak_direct_text(self, text: str) -> None:
-        """Speak text directly so briefing output is not paraphrased.
+    async def speak(self, text: str, *, await_completion: bool = True, timeout: float = 90.0) -> None:
+        """Read finished text aloud in the single JARVIS voice.
 
-        Prefer OpenAI text-to-speech with the same configured JARVIS voice so
-        the briefing sounds consistent with the rest of the assistant.
+        This is the ONLY way the assistant produces speech. The orchestrator
+        does all of the thinking and hands the final text here, so startup
+        briefings and live answers all come out of the same Realtime voice.
+
+        We use an out-of-band response (``conversation: "none"``) so it neither
+        consumes nor pollutes the Realtime conversation history, and we pin the
+        instructions so the model reads the text verbatim instead of
+        paraphrasing it. Audio streams back through ``on_audio`` exactly like a
+        normal reply, so the existing player thread owns speaking-state and
+        mic-resume timing.
         """
-        if self.on_transcript:
-            self.on_transcript("assistant", text)
+        text = (text or "").strip()
+        if not text:
+            return
 
-        if self.on_speaking:
-            try:
-                self.on_speaking(True)
-            except Exception as e:
-                log.debug("direct_speech.speaking_start_failed", error=str(e))
+        if self._speak_lock is None:
+            self._speak_lock = asyncio.Lock()
 
-        try:
-            from .config import get_settings
-
-            app_settings = get_settings()
-            if sys.platform == "darwin" and app_settings.openai_api_key:
-                tts_url = "https://api.openai.com/v1/audio/speech"
-                payload = {
-                    "model": "tts-1",
-                    "voice": app_settings.openai_realtime_voice,
-                    "input": text,
-                    "response_format": "mp3",
-                }
-                playback_volume = os.getenv("JARVIS_DIRECT_SPEECH_VOLUME", "1.15")
-
-                async with httpx.AsyncClient(timeout=90.0) as client:
-                    response = await client.post(
-                        tts_url,
-                        headers={
-                            "Authorization": f"Bearer {app_settings.openai_api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json=payload,
-                    )
-                    response.raise_for_status()
-
-                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-                    tmp.write(response.content)
-                    audio_path = tmp.name
-
+        async with self._speak_lock:
+            if self.on_transcript:
                 try:
-                    if shutil.which("afplay"):
-                        process = await asyncio.create_subprocess_exec(
-                            "afplay",
-                            "-v",
-                            playback_volume,
-                            audio_path,
-                            stdout=asyncio.subprocess.DEVNULL,
-                            stderr=asyncio.subprocess.DEVNULL,
-                        )
-                        await process.wait()
-                    else:
-                        log.warning("direct_speech.player_missing", player="afplay")
-                finally:
-                    try:
-                        os.unlink(audio_path)
-                    except Exception:
-                        pass
-            elif sys.platform == "darwin" and shutil.which("say"):
-                say_voice = os.getenv("JARVIS_DIRECT_SPEECH_VOICE", "Daniel").strip() or "Daniel"
-                process = await asyncio.create_subprocess_exec(
-                    "say",
-                    "-v",
-                    say_voice,
-                    text,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await process.wait()
-            else:
-                log.warning("direct_speech.unavailable", platform=sys.platform)
-        finally:
-            if self.on_speaking:
-                try:
-                    self.on_speaking(False)
+                    self.on_transcript("assistant", text)
                 except Exception as e:
-                    log.debug("direct_speech.speaking_end_failed", error=str(e))
+                    log.debug("speak.transcript_failed", error=str(e))
+
+            done = self._response_done_event
+            if done is not None:
+                done.clear()
+
+            self._speak_active = True
+            log.info("🗣️ speak", chars=len(text), preview=text[:120])
+            try:
+                await self.send_event({
+                    "type": "response.create",
+                    "response": {
+                        "conversation": "none",
+                        "output_modalities": ["audio"],
+                        "instructions": (
+                            "Read the user's message below aloud, verbatim, in your "
+                            "calm British J.A.R.V.I.S. voice. Do not add, remove, "
+                            "translate, or rephrase any words, and do not add any "
+                            "preamble, acknowledgement, or commentary."
+                        ),
+                        "input": [
+                            {
+                                "type": "message",
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": text}],
+                            }
+                        ],
+                    },
+                })
+
+                if not await_completion or done is None:
+                    return
+
+                try:
+                    await asyncio.wait_for(done.wait(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    log.warning("speak.timeout", chars=len(text))
+            finally:
+                self._speak_active = False
+
+    async def _speak_direct_text(self, text: str) -> None:
+        """Backwards-compatible alias - all speech now uses the single voice."""
+        await self.speak(text)
 
     def _handle_binary_pump_message(self, msg: bytes) -> None:
         if not self.on_audio:
@@ -620,51 +659,75 @@ class RealtimeSession:
 
         await self._handle_pump_event(data)
 
-    def _handle_response_event(self, evt_type: str, data: dict[str, Any]) -> None:
+    async def _handle_response_event(self, evt_type: str, data: dict[str, Any]) -> None:
         if evt_type == "response.created":
-            self._response_active = True
             rid = (data.get("response") or {}).get("id", "?")
+            if not self._speak_active:
+                log.info(f"🎬 auto response.created | id={rid} → cancelling immediately")
+                asyncio.create_task(self.send_event({"type": "response.cancel"}))
+                self._auto_response_pending = True
+                return
+            self._response_active = True
+            self._response_audio_seen = False
+            self.response_buffer = ""
+            if self._response_done_event is not None:
+                self._response_done_event.clear()
             log.info(f"🎬 response.created | id={rid}")
             return
 
         if evt_type == "response.cancelled":
             self._response_active = False
+            self._speak_active = False
+            self._auto_response_pending = False
+            if self._response_done_event is not None:
+                self._response_done_event.set()
             log.info("response.cancelled")
             return
 
-        if evt_type == "response.audio.delta":
+        if evt_type in {"response.output_audio.delta", "response.audio.delta"}:
             audio_delta = data.get("delta", "")
-            if audio_delta and self.on_audio:
-                try:
-                    audio_bytes = base64.b64decode(audio_delta)
-                    self.on_audio(audio_bytes)
-                except Exception as e:
-                    log.error("audio_delta_callback_error", error=str(e))
+            if audio_delta:
+                self._response_audio_seen = True
+                log.info(f"🎵 {evt_type} | {len(audio_delta)} chars")
+                if self.on_audio:
+                    try:
+                        audio_bytes = base64.b64decode(audio_delta)
+                        self.on_audio(audio_bytes)
+                    except Exception as e:
+                        log.error("audio_delta_callback_error", error=str(e))
             return
 
-        if evt_type == "response.audio.done":
-            log.info("response.audio.done")
+        if evt_type in {"response.output_audio.done", "response.audio.done"}:
+            log.info(evt_type)
             self.has_responded = True
             return
 
         if evt_type == "response.done":
             log.info("response.done")
+            log.info("response.done payload", response=data.get("response"))
             self.has_responded = True
             self._response_active = False
+            self._speak_active = False
 
             resp = data.get("response") or {}
             status = resp.get("status")
-            if status and status != "completed":
+            if status == "cancelled":
+                self._auto_response_pending = False
+                log.info("response.done.cancelled", reason=resp.get("status_details", {}).get("reason"))
+            elif status and status != "completed":
                 log.error(
                     "🚨 response.done non-completed",
                     status=status,
                     status_details=resp.get("status_details"),
                 )
+            if self._response_done_event is not None:
+                self._response_done_event.set()
 
     def _handle_commit_event(self, evt_type: str, data: dict[str, Any]) -> None:
         if evt_type == "input_audio_buffer.committed":
             item_id = data.get("item_id", "?")
             log.info(f"📝 input_audio_buffer.committed | item_id={item_id}")
+            self._input_buffer_committed = True
             if self._commit_ack_event is not None:
                 self._commit_ack_event.set()
             return
@@ -675,39 +738,65 @@ class RealtimeSession:
 
         if evt_type == "input_audio_buffer.speech_stopped":
             log.info("input_audio_buffer.speech_stopped")
+            log.info("input_audio_buffer.speech_stopped payload", event_data=data)
+
+    def _emit_user_transcript(self, transcript: str) -> None:
+        """Forward a transcribed user utterance to the orchestrator and handle side-effects."""
+        transcript = (transcript or "").strip()
+        if not transcript:
+            return
+        log.info("🎤 USER_SAID", text=transcript)
+        if self.on_transcript:
+            self.on_transcript("user", transcript)
+        if os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true":
+            asyncio.create_task(self._extract_and_maybe_store_memory(transcript))
+
+    def _cancel_auto_response_if_pending(self) -> None:
+        if self._auto_response_pending:
+            log.info("🎬 auto response.cancelled (transcript ready)")
+            self._auto_response_pending = False
 
     def _handle_item_event(self, evt_type: str, data: dict[str, Any]) -> None:
         if evt_type != "conversation.item.created":
             return
 
         item = data.get("item") or {}
+        role = item.get("role", "?")
         log.info(
             f"conversation.item.created | type={item.get('type','?')} "
-            f"role={item.get('role','?')}"
+            f"role={role}"
         )
+        if role == "user":
+            transcript = ""
+            for part in item.get("content") or []:
+                if isinstance(part, dict):
+                    if part.get("type") == "input_text":
+                        transcript = part.get("text", "")
+                        break
+                    elif part.get("type") == "input_audio":
+                        transcript = part.get("transcript", "")
+                        if transcript:
+                            break
+            if transcript:
+                self._emit_user_transcript(transcript)
+                self._cancel_auto_response_if_pending()
 
     def _handle_transcript_event(self, evt_type: str, data: dict[str, Any]) -> None:
         if evt_type == "conversation.item.input_audio_transcription.completed":
             transcript = data.get("transcript", "")
-            if transcript:
-                log.info("🎤 USER_SAID", text=transcript)
-                if self.on_transcript:
-                    self.on_transcript("user", transcript)
-                if os.getenv("MEMORY_AUTO_EXTRACT", "true").lower() == "true":
-                    asyncio.create_task(self._extract_and_maybe_store_memory(transcript))
+            self._emit_user_transcript(transcript)
+            self._cancel_auto_response_if_pending()
             return
 
-        if evt_type == "response.audio_transcript.delta":
+        if evt_type in {"response.audio_transcript.delta", "response.output_audio_transcript.delta", "response.output_text.delta"}:
             delta = data.get("delta", "")
-            self.response_buffer += delta
-            if self.on_transcript:
-                self.on_transcript("assistant", self.response_buffer)
+            if delta:
+                self.response_buffer += delta
             return
 
-        if evt_type == "response.audio_transcript.done":
+        if evt_type in {"response.audio_transcript.done", "response.output_audio_transcript.done", "response.output_text.done"}:
             if self.response_buffer:
                 log.info("🤖 JARVIS_SAID", text=self.response_buffer[:200])
-            self.response_buffer = ""
 
     async def _handle_tool_call_event(self, evt_type: str, data: dict[str, Any]) -> None:
         if evt_type != "response.function_call_arguments.done":
@@ -734,9 +823,14 @@ class RealtimeSession:
         evt_type = data.get("type", "")
 
         if evt_type == "error":
-            log.error("realtime.error", error=data)
+            err = (data.get("error") or {})
+            code = err.get("code", "")
+            if code in ("input_audio_buffer_commit_empty", "response_cancel_not_active"):
+                log.debug("realtime.error.benign", code=code, message=err.get("message", ""))
+            else:
+                log.error("realtime.error", error=data)
 
-        self._handle_response_event(evt_type, data)
+        await self._handle_response_event(evt_type, data)
         self._handle_commit_event(evt_type, data)
         self._handle_item_event(evt_type, data)
         self._handle_transcript_event(evt_type, data)
@@ -829,7 +923,7 @@ class RealtimeSession:
             }
         })
 
-        await self.send_event({"type": "response.create"})
+        await self.send_event(self._build_response_create_event())
 
         log.info("tool_result", name=name, result=output[:200])
 
@@ -955,7 +1049,7 @@ class RealtimeSession:
                 ],
             },
         })
-        await self.send_event({"type": "response.create"})
+        await self.send_event(self._build_response_create_event())
     
     async def append_audio(self, pcm16_bytes: bytes) -> None:
         """Send audio data to OpenAI."""
@@ -963,81 +1057,87 @@ class RealtimeSession:
         if not hasattr(self, '_audio_buffer_size'):
             self._audio_buffer_size = 0
             self._audio_chunks = 0
-        self._audio_buffer_size += len(pcm16_bytes)
-        self._audio_chunks += 1
-        
-        if self._audio_chunks <= 3 or self._audio_chunks % 20 == 0:
-            log.info(f"📤 append_audio: chunk #{self._audio_chunks}, {len(pcm16_bytes)} bytes, ws={'OK' if self.ws else 'NONE'}")
-        
+
+        chunk_len = len(pcm16_bytes)
+        chunk_num = self._audio_chunks + 1
+        if chunk_num <= 3 or chunk_num % 20 == 0:
+            log.info(f"📤 append_audio: chunk #{chunk_num}, {chunk_len} bytes, ws={'OK' if self.ws else 'NONE'}")
+
         if not self._ws_alive():
-            if self._audio_chunks <= 3 or self._audio_chunks % 20 == 0:
+            if chunk_num <= 3 or chunk_num % 20 == 0:
                 log.warning(
                     f"⚠️ append_audio: socket closed (code="
                     f"{self.ws.close_code if self.ws else 'None'}), reconnecting…"
                 )
             if not await self._ensure_connected():
-                log.error(f"X Cannot append audio chunk #{self._audio_chunks} - reconnect failed")
+                log.error(f"X Cannot append audio chunk #{chunk_num} - reconnect failed")
                 return
 
         try:
             audio_b64 = base64.b64encode(pcm16_bytes).decode("ascii")
-            if self._audio_chunks <= 3:
-                log.info(f"🎵 Sending audio chunk #{self._audio_chunks}: {len(pcm16_bytes)} bytes -> {len(audio_b64)} chars")
+            if chunk_num <= 3:
+                log.info(f"🎵 Sending audio chunk #{chunk_num}: {chunk_len} bytes -> {len(audio_b64)} chars")
                 log.info(f"🔌 WebSocket state: open={self.ws.state.name if hasattr(self.ws, 'state') else 'unknown'}, close_code={self.ws.close_code}")
-            
+
             message = json.dumps({
                 "type": "input_audio_buffer.append",
                 "audio": audio_b64,
             })
-            
+
             await self.ws.send(message)
-            
-            if self._audio_chunks <= 3:
-                log.info(f"✅ Audio chunk #{self._audio_chunks} sent successfully ({len(message)} chars)")
+
+            self._audio_buffer_size += chunk_len
+            self._audio_chunks = chunk_num
+
+            if chunk_num <= 3:
+                log.info(f"✅ Audio chunk #{chunk_num} sent successfully ({len(message)} chars)")
         except Exception as e:
-            log.error(f"X Failed to send audio chunk #{self._audio_chunks}: {e}")
+            log.error(f"X Failed to send audio chunk #{chunk_num}: {e}")
     
     async def commit_audio(self) -> None:
         """Commit audio buffer."""
         buffer_size = getattr(self, '_audio_buffer_size', 0)
         chunk_count = getattr(self, '_audio_chunks', 0)
-        
+
         log.info(f"🎯 [COMMIT] Committing audio: {chunk_count} chunks, {buffer_size} bytes")
         log.info(f"🔌 [COMMIT] WebSocket state: open={self.ws.state.name if self.ws and hasattr(self.ws, 'state') else 'unknown'}, close_code={self.ws.close_code if self.ws else 'N/A'}")
-        
+
         if not self._ws_alive():
             log.warning("⚠️ [COMMIT] Socket closed - reconnecting before commit")
             if not await self._ensure_connected():
                 log.error("X [COMMIT] Cannot commit - reconnect failed")
                 return
 
-        if buffer_size == 0:
-            log.warning("⚠️ [COMMIT] No audio to commit! Skipping response creation.")
+        if self._input_buffer_committed:
+            log.info("🎯 [COMMIT] Server already committed buffer — skipping manual commit")
+            self._audio_buffer_size = 0
+            self._audio_chunks = 0
+            self._input_buffer_committed = False
             return
 
-        if self._response_active:
-            log.warning("⚠️ [COMMIT] prior response still active - cancelling")
-            await self.send_event({"type": "response.cancel"})
-            await asyncio.sleep(0.2)
-            self._response_active = False
+        min_buffer_bytes = 3200
+        if buffer_size < min_buffer_bytes:
+            log.warning(f"⚠️ [COMMIT] Buffer too small ({buffer_size} bytes < {min_buffer_bytes} bytes). Skipping commit.")
+            self._audio_buffer_size = 0
+            self._audio_chunks = 0
+            return
 
-        log.info("🎯 [COMMIT] Sending commit event...")
-        if self._commit_ack_event is not None:
-            self._commit_ack_event.clear()
+        commit_ack = self._commit_ack_event
+        if commit_ack is not None:
+            commit_ack.clear()
+
+        log.info("🎯 [COMMIT] Sending commit event (transcription only, no response)…")
         await self.send_event({"type": "input_audio_buffer.commit"})
 
-        if self._commit_ack_event is not None:
+        if commit_ack is not None:
             try:
-                await asyncio.wait_for(self._commit_ack_event.wait(), timeout=1.0)
+                await asyncio.wait_for(commit_ack.wait(), timeout=1.0)
             except asyncio.TimeoutError:
                 log.warning("⏱️ [COMMIT] commit ack not seen within 1.0s (continuing)")
 
-        log.info("🎯 [COMMIT] Creating response…")
-        self._last_response_create_at = asyncio.get_event_loop().time()
-        await self.send_event({"type": "response.create"})
-
         self._audio_buffer_size = 0
         self._audio_chunks = 0
+        self._input_buffer_committed = False
         log.info("🎯 [COMMIT] Audio counters reset")
     
     async def events(self) -> AsyncIterator[dict[str, Any]]:

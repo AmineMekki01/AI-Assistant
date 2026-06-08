@@ -27,6 +27,7 @@ _PLAYER_STATE_SCRIPT: str = (
 
 _CACHE_TTL_SECONDS: float = 1.0
 _CACHE: Tuple[float, bool] = (0.0, False)
+_VOICE_FOLLOWUP_OVERRIDE_UNTIL: float = 0.0
 
 
 def _query_music_playing() -> bool:
@@ -71,3 +72,15 @@ def is_music_playing(force_refresh: bool = False) -> bool:
     current = _query_music_playing()
     _CACHE = (now, current)
     return current
+
+
+def set_voice_followup_override(duration_seconds: float = 8.0) -> None:
+    """Allow passive follow-up listening briefly after JARVIS starts music."""
+    global _VOICE_FOLLOWUP_OVERRIDE_UNTIL
+
+    _VOICE_FOLLOWUP_OVERRIDE_UNTIL = time.time() + max(0.0, float(duration_seconds))
+
+
+def voice_followup_override_active() -> bool:
+    """Return ``True`` while the music follow-up override is still active."""
+    return time.time() < _VOICE_FOLLOWUP_OVERRIDE_UNTIL
