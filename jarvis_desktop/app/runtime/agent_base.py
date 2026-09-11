@@ -127,12 +127,14 @@ class Agent:
 
         for iteration in range(self.max_iterations):
             try:
-                resp = await client.chat.completions.create(
-                    model=self.model or _default_model(),
-                    messages=messages,
-                    tools=tool_schemas or None,
-                    tool_choice="auto" if tool_schemas else "none",
-                )
+                request: Dict[str, Any] = {
+                    "model": self.model or _default_model(),
+                    "messages": messages,
+                }
+                if tool_schemas:
+                    request["tools"] = tool_schemas
+                    request["tool_choice"] = "auto"
+                resp = await client.chat.completions.create(**request)
             except Exception as e:
                 log.error(
                     "agent.llm_error",

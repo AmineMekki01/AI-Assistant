@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sys
 import tempfile
 import textwrap
@@ -21,6 +22,32 @@ from .logging import StructuredLog
 from ..runtime import REGISTRY, load_all_capabilities
 
 log = StructuredLog(__name__)
+
+# ---------------------------------------------------------------------------
+# IPv4-only WebSocket connect helper
+# ---------------------------------------------------------------------------
+# The ``websockets`` library can hang indefinitely when IPv6 addresses are
+# returned first by ``getaddrinfo`` (observed on Python 3.12 + macOS).
+# aiohttp and raw-socket handshakes work fine, so this is library-specific.
+# We temporarily filter ``getaddrinfo`` to AF_INET while connecting.
+# ---------------------------------------------------------------------------
+_original_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    """Replacement getaddrinfo that forces IPv4."""
+    return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+
+async def _websockets_connect_ipv4(uri, **kwargs):
+    """Call ``websockets.connect`` with IPv4-only DNS resolution."""
+    import socket as _socket_mod
+    _socket_mod.getaddrinfo = _ipv4_only_getaddrinfo
+    try:
+        return await websockets.connect(uri, **kwargs)
+    finally:
+        _socket_mod.getaddrinfo = _original_getaddrinfo
+
 
 INPUT_SAMPLE_RATE = 16000
 OUTPUT_SAMPLE_RATE = 24000
@@ -256,6 +283,8 @@ for detail.
     WITHOUT `confirmed` - you will receive a DRAFT preview. Do NOT freeform-compose the
     email in your own reply. Read the preview aloud, ask "Shall I send it?", and only
     after the user clearly says yes call `mail_send` again with `confirmed: true`.
+    For saved templates, use `mail_send_template` with the template name and any
+    `replacements` needed; it follows the same preview-then-confirm flow.
   • Calendar: ALWAYS use `calendar_list` (fans out over Google + Apple Calendar -
     iCloud, Holidays, Birthdays, Fêtes and subscribed calendars only exist on Apple).
     For creating events, use `calendar_create` with the same preview-then-confirm
@@ -269,8 +298,16 @@ for detail.
     found", or the user says the wrong track played, call `music_library_search`
     with a shorter query (song title alone, or artist alone) to inspect the library,
     then retry `computer_play_music` passing the chosen `database_id`. Use
-    `computer_music_control` for play/pause/next/prev and `computer_set_volume`
-    for volume.
+    `computer_music_control` for play/pause/stop/next/prev and `computer_set_volume`
+    for volume. If the user says to stop or pause music, call `computer_music_control`
+    immediately instead of answering verbally.
+  • Quick notes: When the user says "note that..." or "remember to...", call
+    `quick_note_create` to save a fast memo. These appear in the daily briefing.
+  • Reminders: When the user says "remind me in..." or "timer for...", call
+    `reminder_create` with the text and delay. JARVIS will alert them when due.
+    `reminder_list` shows upcoming ones; `reminder_cancel` and `reminder_snooze`
+    manage them.
+  • System: Use `toggle_do_not_disturb` to enable/disable macOS Focus mode.
   • Obsidian: Use `knowledge_ask` for grounded answers from the user's vault,
     `knowledge_search` for raw matches.
   • Memory (hybrid):
@@ -312,6 +349,13 @@ for detail.
       the dentist tomorrow". If the workspace agent returns a line starting
       with "Proposed action:", read it to the user, ask for confirmation,
       then execute via `mail_send` / `calendar_create` yourself.
+    - `delegate_to_focus` - enter or exit a deep work session. Example triggers:
+      "focus mode", "let me focus", "study mode", "exit focus". The agent
+      handles music, DND, timers, and context recovery automatically.
+    - `delegate_to_meeting_prep` - brief the user before a meeting. Example
+      triggers: "prep me for my meeting", "what should I know for the call
+      with X". The agent gathers attendee context from memory and relevant
+      notes, then delivers a concise spoken briefing.
   • Live public facts: for anything current or time-sensitive outside the user's
     private calendar/mail/notes — especially bitcoin/crypto prices, stock prices,
     weather, news, exchange rates, and other "latest" questions — ALWAYS call
@@ -411,11 +455,13 @@ class RealtimeSession:
         self._speak_active: bool = False
         self._input_buffer_committed: bool = False
         self._auto_response_pending: bool = False
+        self._cancelled_auto_response_this_turn: bool = False
 
     def reset_turn(self) -> None:
         """Reset the assistant turn state without touching the socket."""
         self.has_responded = False
         self.response_buffer = ""
+        self._cancelled_auto_response_this_turn = False
         self._response_audio_seen = False
 
     async def interrupt_active_response(self) -> None:
@@ -433,14 +479,14 @@ class RealtimeSession:
         """Connect to OpenAI Realtime API."""
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY not set")
-        
+
         log.info("realtime.connecting")
-        
+
         headers = [
             ("Authorization", f"Bearer {self.api_key}"),
         ]
-        
-        self.ws = await websockets.connect(
+
+        self.ws = await _websockets_connect_ipv4(
             _realtime_url(),
             additional_headers=headers,
             max_size=16 * 1024 * 1024,
@@ -512,6 +558,11 @@ class RealtimeSession:
                         "rate": 16000,
                     },
                     "transcription": input_audio_transcription,
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "create_response": False,
+                        "interrupt_response": False,
+                    },
                 },
                 "output": {
                     "format": {
@@ -522,9 +573,7 @@ class RealtimeSession:
                     "speed": 1,
                 },
             },
-            "turn_detection": None,
             "tool_choice": "none",
-            "temperature": 0.6,
         }
         return {
             "type": "session.update",
@@ -571,19 +620,85 @@ class RealtimeSession:
             return json.dumps(output_data, ensure_ascii=False, default=str)
         return str(output_data)
 
+    async def _speak_with_openai_tts(
+        self,
+        text: str,
+        *,
+        timeout: float = 90.0,
+        voice_override: str | None = None,
+    ) -> bool:
+        """Play assistant speech through OpenAI's TTS API on macOS.
+
+        This keeps orchestrator replies deterministic: the text is synthesized
+        directly instead of being reinterpreted by the Realtime model.
+        """
+        if sys.platform != "darwin" or not self.api_key:
+            return False
+
+        if not shutil.which("afplay"):
+            log.info("speak.tts_unavailable", reason="afplay missing")
+            return False
+
+        from .config import get_settings
+
+        voice = voice_override or get_settings().openai_realtime_voice
+        model = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
+        tmp_path: str | None = None
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/audio/speech",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json={
+                        "model": model,
+                        "voice": voice,
+                        "input": text,
+                        "response_format": "mp3",
+                    },
+                )
+                response.raise_for_status()
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+                tmp.write(response.content)
+                tmp_path = tmp.name
+
+            if self.on_speaking:
+                try:
+                    self.on_speaking(True)
+                except Exception as e:
+                    log.debug("speak.on_speaking_true_failed", error=str(e))
+
+            process = await asyncio.create_subprocess_exec(
+                "afplay",
+                tmp_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await process.wait()
+            return process.returncode == 0
+        except Exception as e:
+            log.warning("speak.tts_failed", error=str(e))
+            return False
+        finally:
+            if self.on_speaking:
+                try:
+                    self.on_speaking(False)
+                except Exception as e:
+                    log.debug("speak.on_speaking_false_failed", error=str(e))
+
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
     async def speak(self, text: str, *, await_completion: bool = True, timeout: float = 90.0) -> None:
         """Read finished text aloud in the single JARVIS voice.
 
-        This is the ONLY way the assistant produces speech. The orchestrator
-        does all of the thinking and hands the final text here, so startup
-        briefings and live answers all come out of the same Realtime voice.
-
-        We use an out-of-band response (``conversation: "none"``) so it neither
-        consumes nor pollutes the Realtime conversation history, and we pin the
-        instructions so the model reads the text verbatim instead of
-        paraphrasing it. Audio streams back through ``on_audio`` exactly like a
-        normal reply, so the existing player thread owns speaking-state and
-        mic-resume timing.
+        On macOS we synthesize speech directly via OpenAI TTS and play it with
+        afplay so the text is read verbatim. If that path is unavailable, we
+        fall back to the Realtime voice pipeline.
         """
         text = (text or "").strip()
         if not text:
@@ -599,12 +714,19 @@ class RealtimeSession:
                 except Exception as e:
                     log.debug("speak.transcript_failed", error=str(e))
 
+            log.info("🗣️ speak", chars=len(text), preview=text[:120])
+
+            if sys.platform == "darwin":
+                if await self._speak_with_openai_tts(text, timeout=timeout):
+                    return
+                if await self._speak_with_openai_tts(text, timeout=timeout, voice_override="alloy"):
+                    return
+
             done = self._response_done_event
             if done is not None:
                 done.clear()
 
             self._speak_active = True
-            log.info("🗣️ speak", chars=len(text), preview=text[:120])
             try:
                 await self.send_event({
                     "type": "response.create",
@@ -663,9 +785,13 @@ class RealtimeSession:
         if evt_type == "response.created":
             rid = (data.get("response") or {}).get("id", "?")
             if not self._speak_active:
+                if self._cancelled_auto_response_this_turn:
+                    log.info(f"🎬 auto response.created | id={rid} → already cancelled this turn, ignoring")
+                    return
                 log.info(f"🎬 auto response.created | id={rid} → cancelling immediately")
                 asyncio.create_task(self.send_event({"type": "response.cancel"}))
                 self._auto_response_pending = True
+                self._cancelled_auto_response_this_turn = True
                 return
             self._response_active = True
             self._response_audio_seen = False
@@ -728,6 +854,7 @@ class RealtimeSession:
             item_id = data.get("item_id", "?")
             log.info(f"📝 input_audio_buffer.committed | item_id={item_id}")
             self._input_buffer_committed = True
+            self._cancelled_auto_response_this_turn = False
             if self._commit_ack_event is not None:
                 self._commit_ack_event.set()
             return
@@ -923,6 +1050,9 @@ class RealtimeSession:
             }
         })
 
+        # Mark that we are expecting spoken output so _handle_response_event
+        # doesn't auto-cancel the model's reply after this tool call.
+        self._speak_active = True
         await self.send_event(self._build_response_create_event())
 
         log.info("tool_result", name=name, result=output[:200])

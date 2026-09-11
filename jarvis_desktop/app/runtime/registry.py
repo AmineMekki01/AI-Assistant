@@ -192,6 +192,9 @@ _TOOL_MODULES = (
     "app.tools.music_playback",
     "app.tools.system_control",
     "app.tools.datetime_tool",
+    "app.tools.quick_notes",
+    "app.tools.reminders",
+    "app.tools.mail_templates",
 )
 
 _ACTION_MODULES = (
@@ -205,6 +208,8 @@ _AGENT_MODULES: tuple[str, ...] = (
     "app.agents.briefing",
     "app.agents.startup_briefing",
     "app.agents.workspace",
+    "app.agents.focus",
+    "app.agents.meeting_prep",
 )
 
 

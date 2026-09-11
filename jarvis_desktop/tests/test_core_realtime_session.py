@@ -41,9 +41,11 @@ class FakeAsyncClient:
 class FakeProcess:
     def __init__(self):
         self.wait_called = False
+        self.returncode = None
 
     async def wait(self):
         self.wait_called = True
+        self.returncode = 0
         return 0
 
 
@@ -59,6 +61,7 @@ class FakeSessionSocket:
 async def test_build_session_config_uses_configured_voice(monkeypatch):
     monkeypatch.setattr(rs, "load_all_capabilities", lambda: None)
     monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
+        openai_realtime_model="gpt-realtime-mini",
         openai_realtime_voice="ash",
         personal_info={"name": "Amine"},
     ))
@@ -67,16 +70,26 @@ async def test_build_session_config_uses_configured_voice(monkeypatch):
     payload = session._build_session_config([])
 
     assert payload["type"] == "session.update"
-    assert payload["session"]["voice"] == "ash"
-    assert "delegate_to_briefing" in payload["session"]["instructions"]
-    assert "latest information" in payload["session"]["instructions"]
-    assert "ask a clarifying question instead of delegating" in payload["session"]["instructions"]
+    assert payload["session"]["model"] == "gpt-realtime-mini"
+    assert payload["session"]["audio"]["output"]["voice"] == "ash"
+    turn_detection = payload["session"]["audio"]["input"]["turn_detection"]
+    assert turn_detection["type"] == "server_vad"
+    assert turn_detection["create_response"] is False
+    assert turn_detection["interrupt_response"] is False
+    assert "temperature" not in payload["session"]
+    assert payload["session"]["tool_choice"] == "none"
+    # The realtime model is a pure voice layer: it only reads text aloud.
+    instructions = payload["session"]["instructions"]
+    assert "J.A.R.V.I.S." in instructions
+    assert "text-to-speech" in instructions
+    assert "Do not call tools" in instructions
 
 
 @pytest.mark.asyncio
 async def test_speak_direct_text_uses_openai_tts_voice(monkeypatch):
     monkeypatch.setattr(rs.sys, "platform", "darwin")
     monkeypatch.setattr(rs, "load_all_capabilities", lambda: None)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
         openai_api_key="test-key",
         openai_realtime_voice="ash",
@@ -145,7 +158,10 @@ async def test_delegate_to_briefing_uses_normal_realtime_pipeline(monkeypatch):
             "output": "It’s a quiet day with no events.",
         },
     }
-    assert payloads[1] == {"type": "response.create"}
+    assert payloads[1] == {
+        "type": "response.create",
+        "response": {"conversation": "auto", "output_modalities": ["audio"]},
+    }
 
 
 @pytest.mark.asyncio
@@ -193,4 +209,7 @@ async def test_send_user_text_emits_user_message_and_response(monkeypatch):
     assert payloads[0]["type"] == "conversation.item.create"
     assert payloads[0]["item"]["role"] == "user"
     assert payloads[0]["item"]["content"][0]["text"] == "yes"
-    assert payloads[1] == {"type": "response.create"}
+    assert payloads[1] == {
+        "type": "response.create",
+        "response": {"conversation": "auto", "output_modalities": ["audio"]},
+    }

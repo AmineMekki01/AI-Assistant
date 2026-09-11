@@ -53,6 +53,8 @@ Tools available:
 - `get_time` / `get_date` - anchor the briefing to today and the current time.
 - `calendar_list` - events across Google + Apple calendars.
 - `mail_list` - recent messages across Gmail + Zimbra/OVH.
+- `quick_note_list` - pending quick-capture voice memos the user has saved.
+- `reminder_list` - upcoming scheduled reminders and timers.
 - `memory_recall` - durable facts about the user that may change the reading of
   the day (people, projects, preferences, routines).
 - `knowledge_search` - find relevant note snippets in Obsidian.
@@ -67,9 +69,11 @@ Planning rules:
 3. For mail, prioritise unread or actionable messages. If the inbox is noisy,
    summarise only the items that need attention. If this is a morning briefing or
    a catch-up request, prefer unread mail first.
-4. There is no dedicated reminders subsystem yet. Treat reminders as deadlines,
-   action items, follow-ups, or tasks inferred from notes, calendar events, and
-   mail. If nothing obvious exists, say that briefly.
+4. Check `quick_note_list` for any pending voice memos and `reminder_list`
+   for any upcoming scheduled reminders. Mention them briefly in the action
+   items section if they exist. Treat reminders as deadlines, action items,
+   follow-ups, or tasks inferred from notes, calendar events, mail, quick
+   notes, and scheduled reminders. If nothing obvious exists, say that briefly.
 5. Use `knowledge_search` for likely reminder/task keywords or project names,
    and `knowledge_ask` when you want a short note-based synthesis.
 6. Use `memory_recall` for personal context that changes how the briefing should
@@ -115,6 +119,8 @@ class BriefingAgent(Agent):
         "memory_recall",
         "knowledge_search",
         "knowledge_ask",
+        "quick_note_list",
+        "reminder_list",
     ]
     system_prompt = _SYSTEM_PROMPT
 

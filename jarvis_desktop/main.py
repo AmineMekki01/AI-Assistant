@@ -9,6 +9,7 @@ import sys
 import asyncio
 import threading
 import queue
+import subprocess
 from collections import deque
 import re
 import time
@@ -20,6 +21,7 @@ from dotenv import load_dotenv
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 NATIVE_MIC_RESUME_DELAY_SECONDS = 0.2
+MUSIC_DUCK_TARGET_VOLUME = 30
 
 env_path = SCRIPT_DIR / ".env"
 if env_path.exists():
@@ -58,7 +60,6 @@ class JarvisWebSocketApp:
         self._native_voice_cooldown_until = 0.0
         self._jarvis_last_output_at = 0.0
         self._native_mic_resume_at = 0.0
-        self._native_music_override_until = 0.0
         self._native_listening_window_until = 0.0
         self._native_recording_has_speech = False
         self._native_background_energy = 0.0
@@ -72,6 +73,7 @@ class JarvisWebSocketApp:
         self._native_voice_frame_count = 0
         self._native_voice_started_at = 0.0
         self._activation_sequence_running = False
+        self._music_volume_before_duck: int | None = None
         self.pending_mail_draft = None
         self._recording_audio_buffer = []
         self._audio_chunk_count = 0
@@ -94,6 +96,9 @@ class JarvisWebSocketApp:
         self.bridge = None
         
         self._speaking_timer = None
+        self._reminder_poller_thread: threading.Thread | None = None
+        self._reminder_poller_stop = threading.Event()
+        self._reminder_last_alerted: dict[str, float] = {}
 
     @staticmethod
     def _normalize_wake_word(text: str) -> str:
@@ -130,6 +135,85 @@ class JarvisWebSocketApp:
         required = ["openwakeword", "pyaudio"]
         missing = [name for name in required if importlib.util.find_spec(name) is None]
         return missing
+
+    def _query_system_volume(self) -> int | None:
+        if sys.platform != "darwin":
+            return None
+
+        try:
+            proc = subprocess.run(
+                ["osascript", "-e", 'output volume of (get volume settings)'],
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+        except Exception as e:
+            print(f"⚠️  [VOICE] Failed to query system volume: {e}", flush=True)
+            return None
+
+        if proc.returncode != 0:
+            return None
+
+        try:
+            return int(float((proc.stdout or "").strip()))
+        except Exception:
+            return None
+
+    def _set_system_volume(self, level: int) -> bool:
+        if sys.platform != "darwin":
+            return False
+
+        clamped = max(0, min(100, int(level)))
+        try:
+            proc = subprocess.run(
+                ["osascript", "-e", f"set volume output volume {clamped}"],
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+        except Exception as e:
+            print(f"⚠️  [VOICE] Failed to set system volume: {e}", flush=True)
+            return False
+
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip()
+            print(f"⚠️  [VOICE] System volume change failed: {stderr}", flush=True)
+            return False
+
+        return True
+
+    def _update_music_listening_volume(self, music_playing: bool, allow_passive_followup: bool) -> None:
+        should_duck = music_playing and (allow_passive_followup or self._native_voice_armed) and not (self.bridge and self.bridge.is_speaking)
+
+        if should_duck:
+            if self._music_volume_before_duck is not None:
+                return
+
+            current_volume = self._query_system_volume()
+            if current_volume is None:
+                return
+
+            target_volume = min(current_volume, MUSIC_DUCK_TARGET_VOLUME)
+            if target_volume >= current_volume:
+                return
+
+            if self._set_system_volume(target_volume):
+                self._music_volume_before_duck = current_volume
+                print(
+                    f"🔉 [VOICE] Ducking Music volume from {current_volume}% to {target_volume}% while listening",
+                    flush=True,
+                )
+            return
+
+        if self._music_volume_before_duck is None:
+            return
+
+        previous_volume = self._music_volume_before_duck
+        self._music_volume_before_duck = None
+        if self._set_system_volume(previous_volume):
+            print(f"🔊 [VOICE] Restored Music volume to {previous_volume}%", flush=True)
 
     def _get_speaker_verifier(self):
         if self._speaker_verifier is False:
@@ -475,6 +559,22 @@ class JarvisWebSocketApp:
     def _should_ignore_trigger(self) -> bool:
         return bool(self.bridge and self.bridge.is_speaking)
 
+    def _reset_native_recording_state(self) -> None:
+        self._recording_audio_buffer = []
+        self._audio_chunk_count = 0
+        self._total_audio_sent = 0
+        self._native_recording_has_speech = False
+        self._native_voice_armed = False
+        self._native_voice_last_activity = 0.0
+        self._native_recording_started_at = 0.0
+        self._native_speech_streak = 0
+        self._native_pre_roll_audio.clear()
+        if self.bridge:
+            self.bridge.set_recording_state(False)
+
+    def _music_blocks_clap_trigger(self, music_playing: bool) -> bool:
+        return bool(music_playing and not music_state.voice_followup_override_active())
+
     @staticmethod
     def _native_silence_timeout(recording_duration: float) -> float:
         """Return an adaptive end-of-speech timeout.
@@ -667,11 +767,12 @@ class JarvisWebSocketApp:
 
         try:
             while not self._native_voice_stop.is_set():
-                now = time.time()
                 music_playing = is_music_playing()
                 shared_music_override_active = music_state.voice_followup_override_active()
-                music_override_active = now < self._native_music_override_until
-                music_blocks_passive = music_playing and not (music_override_active or shared_music_override_active)
+                in_listening_window = time.time() < self._native_listening_window_until
+                allow_passive_followup = in_listening_window or shared_music_override_active
+
+                self._update_music_listening_volume(music_playing, allow_passive_followup)
 
                 if self._activation_sequence_running:
                     self._send_voice_debug(
@@ -695,32 +796,9 @@ class JarvisWebSocketApp:
                     )
                     if self._native_voice_armed:
                         print("🔇 [VOICE] JARVIS speaking — aborting recording", flush=True)
-                        self._recording_audio_buffer = []
-                        self._audio_chunk_count = 0
-                        self._total_audio_sent = 0
-                        self.bridge.set_recording_state(False)
-                        self._native_voice_armed = False
+                        self._reset_native_recording_state()
                     time.sleep(0.05)
                     continue
-
-                if music_blocks_passive:
-                    self._trace_native_voice_skip("Music is playing")
-                    self._send_voice_debug(
-                        status="music_blocked",
-                        armed=self._native_voice_armed,
-                        music_playing=music_playing,
-                        allow_passive_followup=False,
-                        skip_reason="Music is playing",
-                    )
-                    print("🔇 [VOICE] Music is playing — passive follow-up paused", flush=True)
-                    if self._native_voice_armed:
-                        print("🔇 [VOICE] Music is playing — aborting recording", flush=True)
-                        self._recording_audio_buffer = []
-                        self._audio_chunk_count = 0
-                        self._total_audio_sent = 0
-                        if self.bridge:
-                            self.bridge.set_recording_state(False)
-                        self._native_voice_armed = False
 
                 if time.time() < self._native_mic_resume_at:
                     remaining = self._native_mic_resume_at - time.time()
@@ -749,8 +827,6 @@ class JarvisWebSocketApp:
                     if audio.size == 0:
                         continue
 
-                    in_listening_window = time.time() < self._native_listening_window_until
-                    allow_passive_followup = in_listening_window and not music_blocks_passive
                     self._trace_native_voice_heartbeat(
                         armed=self._native_voice_armed,
                         music_playing=music_playing,
@@ -815,7 +891,7 @@ class JarvisWebSocketApp:
                     is_start_speech_frame = frame_energy >= speech_start_threshold
 
                     if not self._native_voice_armed and not allow_passive_followup:
-                        if self._detect_clap_trigger(frame_energy):
+                        if not self._music_blocks_clap_trigger(music_playing) and self._detect_clap_trigger(frame_energy):
                             print("👏 [VOICE] Clap detected — activating assistant", flush=True)
                             self._send_voice_debug(
                                 status="clap_detected",
@@ -824,8 +900,6 @@ class JarvisWebSocketApp:
                                 allow_passive_followup=False,
                                 skip_reason="Clap trigger detected",
                             )
-                            if music_playing:
-                                self._native_music_override_until = time.time() + 8.0
                             self._trigger_activation_sequence("clap")
                             self._native_last_frame_energy = frame_energy
                             continue
@@ -859,9 +933,6 @@ class JarvisWebSocketApp:
                                 allow_passive_followup=False,
                                 skip_reason="Wake word trigger detected",
                             )
-                            if music_playing:
-                                self._native_music_override_until = time.time() + 8.0
-                                print("🔓 [VOICE] Wake word heard during music — enabling temporary mic override", flush=True)
                             self._trigger_activation_sequence("wake_word")
                             self._native_last_frame_energy = frame_energy
                             continue
@@ -962,6 +1033,7 @@ class JarvisWebSocketApp:
             print(f"💥 [VOICE] Native wake loop crashed: {e}", flush=True)
             self._set_voice_status("error", "Wake word listener crashed")
         finally:
+            self._update_music_listening_volume(False, False)
             self._native_voice_armed = False
             try:
                 if stream is not None:
@@ -998,6 +1070,7 @@ class JarvisWebSocketApp:
         time.sleep(0.5)
 
         self._start_native_voice_listener()
+        self._start_reminder_poller()
 
         self._start_speaker_verifier_warmup()
 
@@ -1018,6 +1091,8 @@ class JarvisWebSocketApp:
     def stop(self):
         """Stop the application."""
         self._stop_native_voice_listener()
+        self._update_music_listening_volume(False, False)
+        self._stop_reminder_poller()
         if self.bridge:
             self.bridge.stop()
         if self.session and self.event_loop:
@@ -1458,16 +1533,10 @@ class JarvisWebSocketApp:
                         f"🚫 [VOICE] Speaker verification failed (similarity={similarity_text}, threshold={threshold_text}) — discarding recording",
                         flush=True,
                     )
-                    self._total_audio_sent = 0
-                    self._audio_chunk_count = 0
-                    self._native_recording_has_speech = False
-                    self._native_voice_armed = False
+                    self._reset_native_recording_state()
                     self._native_voice_cooldown_until = time.time() + 1.0
                     self._native_listening_window_until = time.time() + 300.0
-                    self._native_speech_streak = 0
-                    self._native_pre_roll_audio.clear()
                     if self.bridge:
-                        self.bridge.set_recording_state(False)
                         self.bridge.send_status("connected", "Speaker verification rejected — try again")
                         self.bridge.send_voice_debug({
                             "status": "speaker_verification_rejected",
@@ -1603,6 +1672,71 @@ class JarvisWebSocketApp:
         except Exception as e:
             print(f"⚠️  [MAIL] Error sending confirmation: {e}")
         
+    def _start_reminder_poller(self) -> None:
+        """Start the background reminder poller thread."""
+        if self._reminder_poller_thread and self._reminder_poller_thread.is_alive():
+            return
+        self._reminder_poller_stop.clear()
+        self._reminder_poller_thread = threading.Thread(target=self._reminder_poller_loop, daemon=True)
+        self._reminder_poller_thread.start()
+        print("⏰ Reminder poller started", flush=True)
+
+    def _stop_reminder_poller(self) -> None:
+        """Signal the reminder poller to stop."""
+        self._reminder_poller_stop.set()
+
+    def _reminder_poller_loop(self) -> None:
+        """Background loop: check for due reminders every 10 seconds and alert the user."""
+        try:
+            from app.tools.reminders import _due_notes, _mark_reminded
+        except Exception as e:
+            print(f"⚠️  Reminder poller unavailable: {e}", flush=True)
+            return
+
+        CHECK_INTERVAL = 10.0
+        DEDUP_WINDOW = 60.0  # Don't re-alert the same reminder within 60s
+
+        while not self._reminder_poller_stop.is_set():
+            try:
+                due = _due_notes()
+                now = time.time()
+                for reminder in due:
+                    rid = reminder.get("id", "")
+                    text = reminder.get("text", "")
+                    if not rid or not text:
+                        continue
+                    last_alerted = self._reminder_last_alerted.get(rid, 0)
+                    if now - last_alerted < DEDUP_WINDOW:
+                        continue
+
+                    # Alert: play a soft chime if available, then speak
+                    print(f"⏰ Reminder due: {text}", flush=True)
+                    self._reminder_last_alerted[rid] = now
+                    _mark_reminded(rid)
+
+                    if self.bridge:
+                        self.bridge.send_status("connected", f"Reminder: {text}")
+
+                    # Speak the reminder if session is ready
+                    if self.session is not None and self.event_loop is not None:
+                        alert_text = f"Sir, it's time: {text}."
+                        try:
+                            future = asyncio.run_coroutine_threadsafe(
+                                self.session.speak(alert_text),
+                                self.event_loop,
+                            )
+                            future.result(timeout=5)
+                        except Exception as e:
+                            print(f"⚠️  Failed to speak reminder: {e}", flush=True)
+            except Exception as e:
+                print(f"⚠️  Reminder poller error: {e}", flush=True)
+
+            # Sleep in small increments so we can exit promptly
+            for _ in range(int(CHECK_INTERVAL * 2)):
+                if self._reminder_poller_stop.is_set():
+                    break
+                time.sleep(0.5)
+
     def _audio_player_thread(self):
         """Play audio from queue with buffering for smooth playback."""
         try:

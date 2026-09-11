@@ -62,6 +62,7 @@ class FakeSession:
         self.appended_audio = []
         self.commits = 0
         self.interrupts = 0
+        self._commit_ack_event = None
         FakeSession.last_instance = self
 
     async def connect(self):
@@ -528,39 +529,38 @@ def test_main_detects_clap_trigger(monkeypatch):
     assert app._speaking_timer is None
 
 
-def test_main_music_playing_gate_blocks_microphone(monkeypatch):
+def test_main_music_blocks_clap_only_without_followup_override(monkeypatch):
     main = importlib.import_module("main")
 
-    calls = []
-
-    def fake_is_music_playing():
-        calls.append(True)
-        return True
-
-    monkeypatch.setattr(main, "is_music_playing", fake_is_music_playing)
+    monkeypatch.setattr(main.music_state, "voice_followup_override_active", lambda: False)
 
     app = main.JarvisWebSocketApp()
-    app._native_voice_armed = True
-    app._recording_audio_buffer = [b"old"]
-    app._audio_chunk_count = 4
-    app._total_audio_sent = 128
+    assert app._music_blocks_clap_trigger(True) is True
+    assert app._music_blocks_clap_trigger(False) is False
 
-    bridge = SimpleNamespace(is_recording=False, set_recording_state=lambda flag: None, is_speaking=False)
-    app.bridge = bridge
+    monkeypatch.setattr(main.music_state, "voice_followup_override_active", lambda: True)
+    assert app._music_blocks_clap_trigger(True) is False
 
-    assert main.is_music_playing() is True
-    if main.is_music_playing():
-        app._recording_audio_buffer = []
-        app._audio_chunk_count = 0
-        app._total_audio_sent = 0
-        app.bridge.set_recording_state(False)
-        app._native_voice_armed = False
 
-    assert calls
-    assert app._native_voice_armed is False
-    assert app._recording_audio_buffer == []
-    assert app._audio_chunk_count == 0
-    assert app._total_audio_sent == 0
+def test_main_ducks_and_restores_music_volume_while_listening(monkeypatch):
+    main = importlib.import_module("main")
+
+    app = main.JarvisWebSocketApp()
+    app.bridge = SimpleNamespace(is_speaking=False)
+
+    volume_calls = []
+    monkeypatch.setattr(app, "_query_system_volume", lambda: 72)
+    monkeypatch.setattr(app, "_set_system_volume", lambda level: volume_calls.append(level) or True)
+
+    app._update_music_listening_volume(music_playing=True, allow_passive_followup=True)
+
+    assert app._music_volume_before_duck == 72
+    assert volume_calls == [main.MUSIC_DUCK_TARGET_VOLUME]
+
+    app._update_music_listening_volume(music_playing=False, allow_passive_followup=False)
+
+    assert app._music_volume_before_duck is None
+    assert volume_calls == [main.MUSIC_DUCK_TARGET_VOLUME, 72]
 
 
 def test_native_silence_timeout_adapts_to_longer_speech():

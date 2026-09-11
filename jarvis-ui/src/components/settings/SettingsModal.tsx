@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { IntegrationsTab, PersonalTab, VoiceTab, AboutTab } from './tabs'
+import { IntegrationsTab, PersonalTab, VoiceTab, AboutTab, QuickNotesTab, RemindersTab } from './tabs'
 import './SettingsModal.css'
 
-type Tab = 'integrations' | 'personal' | 'voice' | 'about'
+type Tab = 'integrations' | 'personal' | 'voice' | 'about' | 'quick_notes' | 'reminders'
 
 interface SettingsModalProps {
   onClose: () => void
@@ -47,6 +47,18 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             🎙️ Voice
           </button>
           <button
+            className={activeTab === 'quick_notes' ? 'active' : ''}
+            onClick={() => setActiveTab('quick_notes')}
+          >
+            📝 Notes
+          </button>
+          <button
+            className={activeTab === 'reminders' ? 'active' : ''}
+            onClick={() => setActiveTab('reminders')}
+          >
+            ⏰ Reminders
+          </button>
+          <button
             className={activeTab === 'about' ? 'active' : ''}
             onClick={() => setActiveTab('about')}
           >
@@ -58,6 +70,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           {activeTab === 'integrations' && <IntegrationsTab />}
           {activeTab === 'personal' && <PersonalTab />}
           {activeTab === 'voice' && <VoiceTab />}
+          {activeTab === 'quick_notes' && <QuickNotesTab />}
+          {activeTab === 'reminders' && <RemindersTab />}
           {activeTab === 'about' && <AboutTab />}
         </div>
       </motion.div>

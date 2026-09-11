@@ -109,12 +109,14 @@ class Orchestrator:
     ) -> str:
         for iteration in range(self.max_iterations):
             try:
-                resp = await client.chat.completions.create(
-                    model=self._model or _default_model(),
-                    messages=messages,
-                    tools=tool_schemas or None,
-                    tool_choice="auto" if tool_schemas else "none",
-                )
+                request: Dict[str, Any] = {
+                    "model": self._model or _default_model(),
+                    "messages": messages,
+                }
+                if tool_schemas:
+                    request["tools"] = tool_schemas
+                    request["tool_choice"] = "auto"
+                resp = await client.chat.completions.create(**request)
             except Exception as e:
                 log.error("orchestrator.llm_error", iteration=iteration, error=str(e))
                 return "Something went wrong while I was thinking that through."

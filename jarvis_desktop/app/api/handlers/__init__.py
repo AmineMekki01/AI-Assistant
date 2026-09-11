@@ -24,6 +24,18 @@ from .speaker import (
     handle_speaker_profile_enroll,
     handle_speaker_profile_clear,
 )
+from .quick_notes import (
+    handle_quick_notes_list,
+    handle_quick_notes_create,
+    handle_quick_notes_done,
+    handle_quick_notes_delete,
+)
+from .reminders import (
+    handle_reminders_list,
+    handle_reminders_create,
+    handle_reminders_cancel,
+    handle_reminders_snooze,
+)
 
 __all__ = [
     "handle_health",
@@ -48,4 +60,12 @@ __all__ = [
     "handle_speaker_profile_status",
     "handle_speaker_profile_enroll",
     "handle_speaker_profile_clear",
+    "handle_quick_notes_list",
+    "handle_quick_notes_create",
+    "handle_quick_notes_done",
+    "handle_quick_notes_delete",
+    "handle_reminders_list",
+    "handle_reminders_create",
+    "handle_reminders_cancel",
+    "handle_reminders_snooze",
 ]

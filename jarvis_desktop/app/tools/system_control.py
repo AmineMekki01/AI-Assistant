@@ -86,3 +86,44 @@ async def computer_set_volume(level: int = 50) -> str:
     if proc.returncode == 0:
         return f"Volume set to {clamped}%"
     return f"Error: Failed to set volume: {proc.stderr.strip()}"
+
+
+@tool(
+    name="toggle_do_not_disturb",
+    description="Toggle macOS Do Not Disturb / Focus mode on or off.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "enabled": {
+                "type": "boolean",
+                "description": "True to enable DND, false to disable",
+            },
+        },
+        "required": ["enabled"],
+    },
+)
+async def toggle_do_not_disturb(enabled: bool = True) -> str:
+    action = "enabling" if enabled else "disabling"
+    # macOS Ventura+ uses Focus modes via Shortcuts or System Settings
+    # Best-effort approach using System Events
+    script = f'''
+        tell application "System Events"
+            tell application process "SystemUIServer"
+                try
+                    click menu bar item "Control Center" of menu bar 1
+                    delay 0.3
+                    set focusCheckbox to checkbox 1 of group 1 of window "Control Center" whose name contains "Focus" or name contains "Do Not Disturb"
+                    click focusCheckbox
+                    delay 0.2
+                    key code 53 -- Escape
+                on error
+                    key code 53 -- Escape
+                end try
+            end tell
+        end tell
+    '''
+    proc = await _run_osascript(script.strip())
+    if proc.returncode == 0:
+        return f"Do Not Disturb {'enabled' if enabled else 'disabled'}."
+    # Fallback: inform user to toggle manually
+    return f"Do Not Disturb {action} attempted. If it did not change, please toggle it manually in Control Center."

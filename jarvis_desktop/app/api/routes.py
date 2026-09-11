@@ -32,3 +32,13 @@ def register_routes(app):
     app.router.add_get('/api/speaker/profile', handlers.handle_speaker_profile_status)
     app.router.add_post('/api/speaker/profile/enroll', handlers.handle_speaker_profile_enroll)
     app.router.add_delete('/api/speaker/profile', handlers.handle_speaker_profile_clear)
+
+    app.router.add_get('/api/quick_notes', handlers.handle_quick_notes_list)
+    app.router.add_post('/api/quick_notes', handlers.handle_quick_notes_create)
+    app.router.add_post('/api/quick_notes/done', handlers.handle_quick_notes_done)
+    app.router.add_post('/api/quick_notes/delete', handlers.handle_quick_notes_delete)
+
+    app.router.add_get('/api/reminders', handlers.handle_reminders_list)
+    app.router.add_post('/api/reminders', handlers.handle_reminders_create)
+    app.router.add_post('/api/reminders/cancel', handlers.handle_reminders_cancel)
+    app.router.add_post('/api/reminders/snooze', handlers.handle_reminders_snooze)

@@ -14,14 +14,16 @@ def test_startup_briefing_prompt_is_short_and_spoken():
     startup_briefing = _load_startup_briefing_module()
     system_prompt = startup_briefing._SYSTEM_PROMPT
 
-    assert "startup briefing sub-agent" in system_prompt
-    assert "2-3 short sentences" in system_prompt
-    assert "no headings" in system_prompt
+    assert "JARVIS" in system_prompt
+    assert "voice-first personal AI assistant" in system_prompt
+    assert "startup briefing" in system_prompt
+    assert "read aloud verbatim" in system_prompt
+    assert "2-3" in system_prompt
+    assert "short sentences" in system_prompt
+    assert "Do not use headings" in system_prompt
     assert "Do not end with a question" in system_prompt
-    assert "activation trigger" in system_prompt
-    assert "calendar_list" in system_prompt
-    assert "mail_list" in system_prompt
-    assert "memory_recall or knowledge_search" in system_prompt
+    assert "calendar" in system_prompt
+    assert "mail" in system_prompt
 
 
 def test_startup_briefing_agent_uses_same_core_briefing_tools():

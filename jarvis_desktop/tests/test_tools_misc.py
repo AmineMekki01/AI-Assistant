@@ -131,6 +131,7 @@ async def test_music_playback_and_library_helpers(monkeypatch):
     monkeypatch.setattr(music_playback, "_run_osascript", fake_run_osascript)
 
     assert await music_playback.computer_music_control("play") == "Music play executed"
+    assert await music_playback.computer_music_control("stop") == "Music stop executed"
     assert await music_playback.computer_music_control("invalid") == "Error: unknown music action: invalid"
 
     async def failing_run_osascript(script, timeout=10.0):

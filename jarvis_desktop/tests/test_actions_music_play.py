@@ -131,6 +131,75 @@ async def test_music_play_routes_library_database_id_toggle_and_outer_error(monk
 
 
 @pytest.mark.asyncio
+async def test_music_play_arms_followup_override_on_successful_starts(monkeypatch):
+    async def fake_ensure_loaded():
+        return True
+
+    async def fake_play_by_database_id(db_id):
+        if db_id == "123":
+            return {"name": "Song A", "artist": "Artist A"}
+        return None
+
+    async def fake_catalog_search(query, limit=1):
+        if query == "catalog hit":
+            return [
+                {
+                    "trackName": "Catalog Song",
+                    "artistName": "Artist C",
+                    "trackViewUrl": "https://music.apple.com/catalog-song",
+                }
+            ]
+        return []
+
+    def fake_search(query, limit=3):
+        if query == "library hit":
+            return [
+                {
+                    "database_id": "123",
+                    "name": "Song A",
+                    "artist": "Artist A",
+                    "album": "Album A",
+                    "score": 0.99,
+                }
+            ]
+        return []
+
+    async def open_in_music_app_ok(url):
+        return True
+
+    async def run_osascript_ok(script, timeout=10.0):
+        return FakeProc(returncode=0)
+
+    async def wait_catalog_ok(expected_name, timeout_s=4.0):
+        return "Catalog Song"
+
+    monkeypatch.setattr(lib, "ensure_loaded", fake_ensure_loaded)
+    monkeypatch.setattr(lib, "play_by_database_id", fake_play_by_database_id)
+    monkeypatch.setattr(lib, "search", fake_search)
+    monkeypatch.setattr(itunes_svc, "search_catalog", fake_catalog_search)
+    monkeypatch.setattr(itunes_svc, "open_in_music_app", open_in_music_app_ok)
+    monkeypatch.setattr(music_action, "_run_osascript", run_osascript_ok)
+    monkeypatch.setattr(music_action, "_wait_for_playing_track", wait_catalog_ok)
+
+    override_calls = []
+
+    def fake_set_voice_followup_override(duration_seconds=8.0):
+        override_calls.append(duration_seconds)
+
+    monkeypatch.setattr(music_state, "set_voice_followup_override", fake_set_voice_followup_override)
+    monkeypatch.setattr(music_state, "is_music_playing", lambda force_refresh=False: True)
+
+    assert await music_action.computer_play_music(query="library hit") == "Now playing: Song A by Artist A"
+    assert await music_action.computer_play_music(query="", database_id="123") == "Now playing: Song A by Artist A"
+    assert await music_action.computer_play_music(query="catalog hit") == (
+        "Now playing from Apple Music: Catalog Song by Artist C"
+    )
+    assert await music_action.computer_play_music(query="") == "Toggled Apple Music playback."
+
+    assert override_calls == [8.0, 8.0, 8.0, 8.0]
+
+
+@pytest.mark.asyncio
 async def test_music_play_catalog_helper_branches(monkeypatch):
     async def no_sleep(delay):
         return None

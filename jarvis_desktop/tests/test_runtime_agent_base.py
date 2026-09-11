@@ -170,6 +170,7 @@ async def test_agent_run_executes_multiple_tool_calls_in_parallel(monkeypatch):
         )
     )
     monkeypatch.setattr(agent_base, "REGISTRY", registry)
+    monkeypatch.setattr(DummyAgent, "tools", ["sample_tool_a", "sample_tool_b"])
     client = ParallelFakeClient()
     monkeypatch.setattr(DummyAgent, "_get_client", lambda self: client)
 
