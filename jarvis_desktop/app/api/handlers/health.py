@@ -1,5 +1,6 @@
 """Health check endpoint."""
 import json
+import asyncio
 from pathlib import Path
 
 from aiohttp import web
@@ -28,7 +29,7 @@ async def handle_health(request):
 async def handle_dashboard_health(request):
     """Return a consolidated integration snapshot for the settings dashboard."""
     from ...services.google_auth import load_google_credentials, token_path
-    from qdrant_client import QdrantClient
+    from .storage import probe_qdrant_status
 
     jarvis_dir = Path.home() / ".jarvis"
 
@@ -50,33 +51,7 @@ async def handle_dashboard_health(request):
         except Exception:
             pass
 
-    qdrant_cache = _read_json(
-        jarvis_dir / "qdrant_status.json",
-        {"connected": False, "collectionExists": False},
-    )
-    qdrant_status = {
-        "connected": False,
-        "collectionExists": False,
-        "host": qdrant_cache.get("host"),
-        "port": qdrant_cache.get("port"),
-        "collectionName": qdrant_cache.get("collectionName"),
-        "lastChecked": qdrant_cache.get("lastChecked"),
-    }
-    try:
-        if qdrant_cache.get("host"):
-            client = QdrantClient(
-                host=qdrant_cache.get("host", "localhost"),
-                port=qdrant_cache.get("port", 6333),
-                api_key=qdrant_cache.get("apiKey"),
-            )
-            collections = client.get_collections()
-            qdrant_status["connected"] = True
-            qdrant_status["collectionExists"] = any(
-                c.name == qdrant_cache.get("collectionName") for c in collections.collections
-            )
-    except Exception:
-        qdrant_status["connected"] = False
-        qdrant_status["collectionExists"] = False
+    qdrant_status = await asyncio.to_thread(probe_qdrant_status)
     obsidian_status = _read_json(
         jarvis_dir / "obsidian_status.json",
         {"synced": False, "lastSync": None, "fileCount": 0},

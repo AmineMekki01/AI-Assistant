@@ -36,28 +36,35 @@ def _chunk_text(text: str, chunk_size: int = 900, overlap: int = 120) -> list[st
     return [c for c in chunks if c]
 
 
-async def handle_qdrant_status(request):
-    """Check Qdrant connection status."""
+def probe_qdrant_status():
+    """Probe the configured database, including the default infra deployment."""
+    from urllib.parse import urlparse
+    parsed = urlparse(os.getenv('QDRANT_URL', 'http://localhost:6333'))
+    data = {'host': parsed.hostname or 'localhost', 'port': parsed.port or 6333,
+            'collectionName': os.getenv('QDRANT_MEMORY_COLLECTION', 'long_term_memory')}
+    result = {'connected': False, 'collectionExists': False}
+    client = None
     try:
         from qdrant_client import QdrantClient
-
         status_path = Path.home() / ".jarvis" / "qdrant_status.json"
         if status_path.exists():
-            data = json.loads(status_path.read_text())
-            client = QdrantClient(host=data.get("host", "localhost"), port=data.get("port", 6333))
-            collections = client.get_collections()
-            collection_exists = any(c.name == data.get("collectionName") for c in collections.collections)
-            return web.json_response({
-                "connected": True,
-                "collectionExists": collection_exists
-            })
+            data.update(json.loads(status_path.read_text()))
+            client = QdrantClient(host=data['host'], port=data['port'], api_key=data.get('apiKey'), timeout=2)
+        else:
+            client = QdrantClient(url=os.getenv('QDRANT_URL', 'http://localhost:6333'), timeout=2)
+        collections = client.get_collections()
+        result.update(connected=True, collectionExists=any(c.name == data['collectionName'] for c in collections.collections))
     except Exception:
         pass
+    finally:
+        if client is not None and hasattr(client, 'close'):
+            client.close()
+    return {**result, **{key: data.get(key) for key in ('host', 'port', 'collectionName', 'lastChecked')}}
 
-    return web.json_response({
-        "connected": False,
-        "collectionExists": False
-    })
+
+async def handle_qdrant_status(request):
+    status = await asyncio.to_thread(probe_qdrant_status)
+    return web.json_response({key: status[key] for key in ('connected', 'collectionExists')})
 
 
 async def handle_qdrant_test(request):

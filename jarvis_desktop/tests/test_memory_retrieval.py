@@ -147,13 +147,8 @@ async def test_smart_recall_uses_qdrant_and_local_fallback(temp_home, monkeypatc
         )
     )
     hits, status = await retrieval.smart_recall("goal tests")
-    assert status == "Local memories (Qdrant unavailable)"
-    assert hits and hits[0].content == "My goal is to ship tests"
+    assert status == "No memories stored in Qdrant"
+    assert hits == []
 
     assert retrieval.should_prime_memory("tell me about my project") is True
     assert retrieval.should_prime_memory("weather tomorrow") is False
-
-
-@pytest.mark.asyncio
-async def test_local_smart_recall_reports_no_memories(temp_home):
-    assert await retrieval._local_smart_recall("goal", 3) == ([], "No memories stored yet")

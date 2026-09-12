@@ -1,0 +1,7 @@
+# Optional owner-voice verification; install into the same environment as main.py.
+# SpeechBrain 1.0 uses the pre-2.9 TorchAudio backend API and HF Hub <1 API.
+speechbrain==1.0.3
+torch==2.8.0
+torchaudio==2.8.0
+huggingface-hub>=0.28,<1.0
+soundfile>=0.13,<0.14

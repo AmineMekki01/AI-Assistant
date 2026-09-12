@@ -124,6 +124,8 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
   const [isWakeListening, setIsWakeListening] = useState(false)
 
   const isRecordingRef = useRef(false)
+  const manualRecordingRef = useRef(false)
+  const togglingRef = useRef(false)
   const isSpeakingRef = useRef(false)
   const dismissedMailDraftRef = useRef<string | null>(null)
   const voiceSettingsRef = useRef<VoiceSettings>(voiceSettings)
@@ -135,7 +137,7 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
     isRecording: wsIsRecording,
     isSpeaking,
     voiceDebug,
-    toggleRecording,
+    setRecording,
     sendAudioChunk,
     send,
     pendingMailDraft: backendMailDraft
@@ -203,14 +205,14 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
   }, [wsIsRecording])
 
   const chunkCounter = useRef(0)
-  const { startRecording, stopRecording, audioLevel } = useAudio(
+  const { startRecording, stopRecording, audioLevel, error: audioError, isRecording: browserRecording } = useAudio(
     useCallback((data: Float32Array) => {
       chunkCounter.current++
       if (chunkCounter.current <= 3) {
         console.log(`🎤 Audio chunk #${chunkCounter.current}:`, data.length, 'samples')
       }
 
-      if (isRecordingRef.current && !isSpeakingRef.current) {
+      if (manualRecordingRef.current && !isSpeakingRef.current) {
         sendAudioChunk(data)
       }
     }, [sendAudioChunk])
@@ -274,8 +276,9 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
       return
     }
 
-    clearPendingMailDraft()
-    send({ type: 'confirm_mail_draft', accepted: true, draft: pendingMailDraft })
+    if (send({ type: 'confirm_mail_draft', accepted: true, draft: pendingMailDraft })) {
+      clearPendingMailDraft()
+    }
   }, [clearPendingMailDraft, pendingMailDraft, send])
 
   const cancelMailDraft = useCallback(() => {
@@ -283,46 +286,49 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
       return
     }
 
-    clearPendingMailDraft()
-    send({ type: 'confirm_mail_draft', accepted: false, draft: pendingMailDraft })
+    if (send({ type: 'confirm_mail_draft', accepted: false, draft: pendingMailDraft })) {
+      clearPendingMailDraft()
+    }
   }, [clearPendingMailDraft, pendingMailDraft, send])
 
-  useEffect(() => {
-    if (!pendingMailDraft) {
-      return
-    }
-
-    const latestUserMessage = [...messages].reverse().find(message => message.role === 'user')
-    if (!latestUserMessage) {
-      return
-    }
-
-    const normalized = latestUserMessage.text.trim().toLowerCase()
-    const affirmative = ['yes', 'yep', 'yeah', 'send it', 'confirm', 'do it', 'please send it']
-    const negative = ['no', 'nope', 'cancel', 'don\'t send', 'do not send', 'stop']
-
-    if (affirmative.includes(normalized) || negative.includes(normalized)) {
-      if (affirmative.includes(normalized)) {
-        confirmMailDraft()
+  const handleToggleRecording = useCallback(async () => {
+    if (togglingRef.current || connectionState !== 'connected') return
+    togglingRef.current = true
+    try {
+      if (manualRecordingRef.current) {
+        await stopRecording()
+        manualRecordingRef.current = false
+        setRecording(false)
       } else {
-        cancelMailDraft()
+        if (!await startRecording()) return
+        manualRecordingRef.current = setRecording(true)
+        if (!manualRecordingRef.current) await stopRecording()
       }
+    } finally {
+      togglingRef.current = false
     }
-  }, [cancelMailDraft, confirmMailDraft, messages, pendingMailDraft])
+  }, [connectionState, startRecording, stopRecording, setRecording])
 
-  const handleToggleRecording = useCallback(() => {
-    const newState = !isRecordingRef.current
-    isRecordingRef.current = newState
-    setUiRecording(newState)
-
-    if (newState) {
-      chunkCounter.current = 0
-      startRecording()
-    } else {
-      stopRecording()
+  useEffect(() => {
+    if (connectionState === 'disconnected' || connectionState === 'error') {
+      manualRecordingRef.current = false
+      void stopRecording()
     }
-    toggleRecording()
-  }, [startRecording, stopRecording, toggleRecording])
+  }, [connectionState, stopRecording])
+
+  useEffect(() => {
+    if (!wsIsRecording && manualRecordingRef.current && !togglingRef.current) {
+      manualRecordingRef.current = false
+      void stopRecording()
+    }
+  }, [wsIsRecording, stopRecording])
+
+  useEffect(() => {
+    if (audioError && !browserRecording && manualRecordingRef.current) {
+      manualRecordingRef.current = false
+      setRecording(false)
+    }
+  }, [audioError, browserRecording, setRecording])
 
   useEffect(() => {
     const wakeStatus = statusMessage.toLowerCase()
@@ -332,7 +338,7 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
 
   const state: JarvisState = useMemo(() => ({
     connectionState,
-    statusMessage,
+    statusMessage: audioError || statusMessage,
     messages,
     isRecording: uiRecording,
     isSpeaking,
@@ -343,7 +349,7 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
     isWakeListening,
     wakeWord: voiceSettings.wakeWord,
     voiceDebug
-  }), [connectionState, statusMessage, messages, uiRecording, isSpeaking, audioLevel, currentTime, systemMetrics, pendingMailDraft, isWakeListening, voiceSettings.wakeWord, voiceDebug])
+  }), [audioError, connectionState, statusMessage, messages, uiRecording, isSpeaking, audioLevel, currentTime, systemMetrics, pendingMailDraft, isWakeListening, voiceSettings.wakeWord, voiceDebug])
 
   const actions: JarvisActions = useMemo(() => ({
     toggleRecording: handleToggleRecording,

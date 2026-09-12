@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,9 +43,9 @@ class FakeMemoryHTTPClient:
 
     async def put(self, url, json=None, timeout=None):
         self.calls.append(("put", url, json, timeout))
-        if self.fail_on_points and url.endswith("/points"):
+        if self.fail_on_points and "/points" in url:
             raise RuntimeError("qdrant down")
-        return SimpleNamespace(raise_for_status=lambda: None)
+        return SimpleNamespace(status_code=200, raise_for_status=lambda: None)
 
 
 class FakeKnowledgeEmbeddings:
@@ -105,42 +106,28 @@ class FakeKnowledgeHTTPClient:
 
 
 @pytest.mark.asyncio
-async def test_memory_remember_success_and_normalizes_category(monkeypatch):
-    client = FakeMemoryHTTPClient(get_status=404)
-    fake_openai = FakeMemoryClient([0.1, 0.2])
-
-    monkeypatch.setattr(memory, "_get_client", lambda: fake_openai)
-    monkeypatch.setattr(memory.httpx, "AsyncClient", lambda *args, **kwargs: client)
-    monkeypatch.setattr(memory, "_qdrant_url", lambda: "http://qdrant.test")
-    monkeypatch.setattr(memory, "_user_id", lambda: "user-123")
-
+async def test_memory_remember_queues_without_waiting_for_qdrant(monkeypatch):
+    writes = []
+    async def fake_write(item):
+        writes.append(item)
+    monkeypatch.setattr(memory, "_write_memory", fake_write)
+    await memory.stop_memory_writer()
     result = await memory.memory_remember("Testing remembers things", category="invalid")
-
-    assert result.startswith("✓ Remembered [other]:")
-    assert client.calls[0][0] == "get"
-    assert client.calls[1][0] == "put"
-    assert client.calls[2][0] == "put"
-    assert client.calls[2][2]["points"][0]["payload"]["category"] == "other"
-    assert fake_openai.embeddings.calls[0]["input"] == "Testing remembers things"
+    assert result.startswith("✓ Memory queued [other, importance 0.50]")
+    await memory._queue.join()
+    assert writes[0].content == "Testing remembers things"
+    assert writes[0].category == "other"
 
 
 @pytest.mark.asyncio
-async def test_memory_remember_falls_back_to_local_store(temp_home, monkeypatch):
-    client = FakeMemoryHTTPClient(fail_on_points=True)
-    fake_openai = FakeMemoryClient([0.9, 0.8])
-
-    monkeypatch.setattr(memory, "_get_client", lambda: fake_openai)
-    monkeypatch.setattr(memory.httpx, "AsyncClient", lambda *args, **kwargs: client)
-    monkeypatch.setattr(memory, "_qdrant_url", lambda: "http://qdrant.test")
-    monkeypatch.setattr(memory, "_user_id", lambda: "user-123")
-
+async def test_memory_remember_reports_queue_full(monkeypatch):
+    class FullQueue:
+        def put_nowait(self, item):
+            raise asyncio.QueueFull
+    monkeypatch.setattr(memory, "_queue", FullQueue())
     result = await memory.memory_remember("Offline fact", category="goal")
-
-    assert result.startswith("✓ Saved locally [goal]")
-    memories_file = temp_home / ".jarvis" / "memories.json"
-    stored = json.loads(memories_file.read_text())
-    assert stored[-1]["content"] == "Offline fact"
-    assert stored[-1]["category"] == "goal"
+    assert result == "Memory queue is full; nothing was stored."
+    await memory.stop_memory_writer()
 
 
 @pytest.mark.asyncio
@@ -151,13 +138,13 @@ async def test_memory_recall_variants_and_local_fallback(temp_home, monkeypatch)
         return [], "No memories stored yet"
 
     monkeypatch.setattr(memory, "smart_recall", no_memories)
-    assert await memory.memory_recall("who am i") == "No memories stored yet."
+    assert await memory.memory_recall("who am i") == "No relevant memories found in Qdrant."
 
     async def no_relevant(query, top_k=5):
         return [], "Nothing matched"
 
     monkeypatch.setattr(memory, "smart_recall", no_relevant)
-    assert await memory.memory_recall("who am i") == "No relevant memories found."
+    assert await memory.memory_recall("who am i") == "No relevant memories found in Qdrant."
 
     hits = [
         SimpleNamespace(content="I like dark mode", category="preference", raw_similarity=0.4),
@@ -173,32 +160,7 @@ async def test_memory_recall_variants_and_local_fallback(temp_home, monkeypatch)
     assert "(uncertain)" in formatted
     assert "(possibly)" in formatted
 
-    memories_file = temp_home / ".jarvis" / "memories.json"
-    memories_file.parent.mkdir(parents=True, exist_ok=True)
-    memories_file.write_text(
-        json.dumps(
-            [
-                {
-                    "content": "Project alpha is due Friday",
-                    "category": "goal",
-                    "timestamp": "2026-05-01T08:00:00+00:00",
-                },
-                {
-                    "content": "Lunch with Sam",
-                    "category": "other",
-                    "timestamp": "2026-05-01T08:05:00+00:00",
-                },
-            ]
-        )
-    )
-
-    async def failing_recall(query, top_k=5):
-        raise RuntimeError("qdrant unavailable")
-
-    monkeypatch.setattr(memory, "smart_recall", failing_recall)
-    local = await memory.memory_recall("project")
-    assert local.startswith("Local memories:")
-    assert "Project alpha is due Friday" in local
+    assert "Relevant memories" in formatted
 
 
 @pytest.mark.asyncio

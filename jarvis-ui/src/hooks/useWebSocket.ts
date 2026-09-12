@@ -95,48 +95,12 @@ export function useWebSocket(url: string) {
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reconnectAttemptsRef = useRef(0)
   const manuallyClosedRef = useRef(false)
-  const outgoingQueueRef = useRef<string[]>([])
 
   const clearReconnectTimer = useCallback(() => {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current)
       reconnectTimeoutRef.current = null
     }
-  }, [])
-
-  const flushOutgoingQueue = useCallback(() => {
-    const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN || outgoingQueueRef.current.length === 0) {
-      return
-    }
-
-    const pending = outgoingQueueRef.current
-    outgoingQueueRef.current = []
-
-    for (const payload of pending) {
-      try {
-        ws.send(payload)
-      } catch (error) {
-        outgoingQueueRef.current.unshift(payload)
-        console.warn('Failed to flush queued websocket message', error)
-        break
-      }
-    }
-  }, [])
-
-  const enqueueOrSend = useCallback((payload: string) => {
-    const ws = wsRef.current
-    if (ws?.readyState === WebSocket.OPEN) {
-      try {
-        ws.send(payload)
-        return true
-      } catch (error) {
-        console.warn('WebSocket send failed, queueing payload for retry', error)
-      }
-    }
-
-    outgoingQueueRef.current.push(payload)
-    return false
   }, [])
 
   const connect = useCallback(() => {
@@ -146,14 +110,15 @@ export function useWebSocket(url: string) {
 
     clearReconnectTimer()
 
+    if (wsRef.current && wsRef.current.readyState <= WebSocket.OPEN) return
     const ws = new WebSocket(url)
     wsRef.current = ws
 
     ws.onopen = () => {
+      if (wsRef.current !== ws) return
       console.log('Connected to JARVIS backend')
       reconnectAttemptsRef.current = 0
       clearReconnectTimer()
-      flushOutgoingQueue()
       setState(prev => ({
         ...prev,
         connectionState: 'connected',
@@ -162,7 +127,7 @@ export function useWebSocket(url: string) {
     }
 
     ws.onclose = () => {
-      if (manuallyClosedRef.current) {
+      if (manuallyClosedRef.current || wsRef.current !== ws) {
         return
       }
 
@@ -170,6 +135,9 @@ export function useWebSocket(url: string) {
       setState(prev => ({
         ...prev,
         connectionState: 'disconnected',
+        isRecording: false,
+        isSpeaking: false,
+        voiceDebug: null,
         statusMessage: 'Connection lost - Retrying...'
       }))
       wsRef.current = null
@@ -181,6 +149,7 @@ export function useWebSocket(url: string) {
     }
 
     ws.onerror = () => {
+      if (wsRef.current !== ws) return
       setState(prev => ({
         ...prev,
         connectionState: 'error',
@@ -189,6 +158,7 @@ export function useWebSocket(url: string) {
     }
 
     ws.onmessage = async (event) => {
+      if (wsRef.current !== ws) return
       const raw = event.data as unknown
       let incoming: unknown = raw
 
@@ -207,6 +177,7 @@ export function useWebSocket(url: string) {
         return
       }
 
+      if (wsRef.current !== ws) return
       if (!isBackendMessage(incoming)) {
         console.warn('Ignoring unknown backend message shape', describeIncomingPayload(incoming))
         return
@@ -215,6 +186,17 @@ export function useWebSocket(url: string) {
       switch (incoming.type) {
         case 'message':
           setState(prev => {
+            if (incoming.id) {
+              const index = prev.messages.findIndex(message => message.id === incoming.id)
+              if (index >= 0) {
+                const messages = [...prev.messages]
+                messages[index] = { ...messages[index], text: incoming.text }
+                return { ...prev, messages }
+              }
+              return { ...prev, messages: [...prev.messages, {
+                id: incoming.id, role: incoming.role, text: incoming.text, timestamp: new Date()
+              }] }
+            }
             const lastMsg = prev.messages[prev.messages.length - 1]
             if (lastMsg && lastMsg.role === incoming.role && incoming.role === 'assistant') {
               return {
@@ -285,7 +267,7 @@ export function useWebSocket(url: string) {
         case 'mail_draft':
           setState(prev => ({
             ...prev,
-            pendingMailDraft: incoming
+            pendingMailDraft: incoming.cleared ? null : incoming
           }))
           break
       }
@@ -295,7 +277,6 @@ export function useWebSocket(url: string) {
   const disconnect = useCallback(() => {
     manuallyClosedRef.current = true
     clearReconnectTimer()
-    outgoingQueueRef.current = []
     if (wsRef.current) {
       wsRef.current.close()
       wsRef.current = null
@@ -303,8 +284,14 @@ export function useWebSocket(url: string) {
   }, [clearReconnectTimer])
 
   const send = useCallback((data: object) => {
-    enqueueOrSend(JSON.stringify(data))
-  }, [enqueueOrSend])
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      setState(prev => ({ ...prev, statusMessage: 'Connection unavailable — please retry when connected' }))
+      return false
+    }
+    ws.send(JSON.stringify(data))
+    return true
+  }, [])
 
   const toggleRecording = useCallback(() => {
     send({ type: 'toggle_recording' })
@@ -319,13 +306,19 @@ export function useWebSocket(url: string) {
     }
     const base64 = btoa(binary)
 
-    console.log('📤 Sending audio chunk, size:', audioData.length, 'base64 length:', base64.length)
+    // Live audio expires immediately. Replaying a disconnected microphone
+    // backlog can execute a request long after the user spoke it.
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > 128 * 1024) return
+    ws.send(JSON.stringify({ type: 'audio_chunk', data: base64 }))
+  }, [])
 
-    enqueueOrSend(JSON.stringify({
-      type: 'audio_chunk',
-      data: base64
-    }))
-  }, [enqueueOrSend])
+  const setRecording = useCallback((isRecording: boolean) => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false
+    ws.send(JSON.stringify({ type: 'set_recording', isRecording }))
+    return true
+  }, [])
 
   useEffect(() => {
     manuallyClosedRef.current = false
@@ -338,6 +331,7 @@ export function useWebSocket(url: string) {
   return {
     ...state,
     toggleRecording,
+    setRecording,
     sendAudioChunk,
     send
   }

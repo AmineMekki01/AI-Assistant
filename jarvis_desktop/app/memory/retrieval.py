@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import asyncio
+import re
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -24,7 +27,7 @@ _client: Optional[OpenAI] = None
 def _get_client() -> OpenAI:
     global _client
     if _client is None:
-        _client = OpenAI()
+        _client = OpenAI(timeout=8.0, max_retries=0)
     return _client
 
 
@@ -90,7 +93,7 @@ def _expand_query(query: str) -> List[str]:
             for alt in alternatives:
                 expanded.append(query.lower().replace(phrase, f"my {alt}"))
     
-    return list(set(expanded))
+    return list(dict.fromkeys(expanded))
 
 
 @dataclass
@@ -102,6 +105,8 @@ class MemoryHit:
     score: float
     raw_similarity: float
     qdrant_id: str
+    importance: float = 0.5
+    status: str = "open"
 
 
 def _calculate_recency_boost(timestamp_str: str) -> float:
@@ -138,7 +143,25 @@ def _rank_memories(
         
         recency = _calculate_recency_boost(timestamp)
         
-        final_score = base * cat_weight * recency
+        try:
+            importance = max(0.0, min(1.0, float(payload.get("importance", 0.5))))
+        except (TypeError, ValueError):
+            importance = 0.5
+        try:
+            ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            age_days = max(0.0, (datetime.now(ts.tzinfo) - ts).total_seconds() / 86400)
+        except Exception:
+            age_days = 0.0
+        try:
+            access_count = max(0, int(payload.get("access_count", 0)))
+        except (TypeError, ValueError):
+            access_count = 0
+        grace_days = min(age_days, access_count * 3.0)
+        decay = math.exp(-0.01 * max(0.0, age_days - grace_days))
+        effective_importance = importance * decay
+        if payload.get("status") == "superseded":
+            effective_importance *= 0.5
+        final_score = base * cat_weight * recency * (0.75 + 0.5 * effective_importance)
         
         results.append(MemoryHit(
             content=payload.get("content", ""),
@@ -147,6 +170,8 @@ def _rank_memories(
             score=final_score,
             raw_similarity=raw_score,
             qdrant_id=hit.get("id", ""),
+            importance=effective_importance,
+            status=payload.get("status", "open"),
         ))
     
     results.sort(key=lambda x: x.score, reverse=True)
@@ -189,7 +214,7 @@ async def smart_recall(
 
     query_type = _detect_query_type(query)
     weights = QUERY_TYPE_WEIGHTS.get(query_type, QUERY_TYPE_WEIGHTS["general"])
-    threshold = min_confidence or _get_dynamic_threshold(query_type)
+    threshold = min_confidence if min_confidence is not None else _get_dynamic_threshold(query_type)
     
     log.info(
         "retrieval.smart_recall",
@@ -205,7 +230,7 @@ async def smart_recall(
     
     for q in expanded_queries[:2]:
         try:
-            vector = _embed(q)
+            vector = await asyncio.to_thread(_embed, q)
             async with httpx.AsyncClient() as http:
                 resp = await http.post(
                     f"{_qdrant_url()}/collections/{MEMORY_COLLECTION}/points/search",
@@ -220,9 +245,6 @@ async def smart_recall(
                     timeout=10.0,
                 )
                 
-                if resp.status_code == 404:
-                    return [], "No memories stored yet"
-                
                 resp.raise_for_status()
                 hits = resp.json().get("result", []) or []
                 
@@ -236,56 +258,43 @@ async def smart_recall(
             break
 
     if not all_hits:
-        return await _local_smart_recall(query, top_k)
+        return [], "No memories stored in Qdrant"
 
     ranked = _rank_memories(all_hits, query_type, weights)
     
     filtered = [m for m in ranked if m.raw_similarity >= threshold]
     
     if not filtered:
-        return ranked[:top_k], "Low confidence results only"
-    
-    return filtered[:top_k], f"Found {len(filtered)} relevant memories"
+        return [], "No relevant memories found in Qdrant"
+    for memory in filtered[:top_k]:
+        asyncio.create_task(_mark_accessed(memory.qdrant_id), name="qdrant-memory-access")
+    return filtered[:top_k], f"Found {len(filtered)} relevant memories in Qdrant"
 
 
-async def _local_smart_recall(query: str, top_k: int) -> Tuple[List[MemoryHit], str]:
-    """Fallback to local JSON storage with keyword matching."""
-    from pathlib import Path
-    import json
-    
-    path = Path.home() / ".jarvis" / "memories.json"
-    if not path.exists():
-        return [], "No memories stored yet"
-    
+async def _mark_accessed(point_id: str) -> None:
+    """Best-effort Qdrant access bookkeeping, off the response path."""
+    if not point_id:
+        return
     try:
-        data = json.loads(path.read_text()) or []
-    except Exception:
-        return [], "Could not read local memories"
-    
-    query_words = {w.lower() for w in query.split() if len(w) > 2}
-    scored: List[Tuple[dict, float]] = []
-    
-    for m in data:
-        content = m.get("content", "").lower()
-        score = sum(1 for w in query_words if w in content) / max(len(query_words), 1)
-        if score > 0:
-            scored.append((m, score))
-    
-    scored.sort(key=lambda x: x[1], reverse=True)
-    
-    hits = [
-        MemoryHit(
-            content=m.get("content", ""),
-            category=m.get("category", "other"),
-            timestamp=m.get("timestamp", ""),
-            score=s * 0.7,
-            raw_similarity=s * 0.7,
-            qdrant_id="local",
-        )
-        for m, s in scored[:top_k]
-    ]
-    
-    return hits, "Local memories (Qdrant unavailable)"
+        now = datetime.now().astimezone().isoformat()
+        async with httpx.AsyncClient() as http:
+            current = await http.get(
+                f"{_qdrant_url()}/collections/{MEMORY_COLLECTION}/points/{point_id}", timeout=3,
+            )
+            if current.status_code == 404:
+                return
+            current.raise_for_status()
+            payload = current.json().get("result", {}).get("payload", {}) or {}
+            response = await http.post(
+                f"{_qdrant_url()}/collections/{MEMORY_COLLECTION}/points/payload",
+                json={"payload": {"last_accessed_at": now,
+                                   "access_count": int(payload.get("access_count", 0)) + 1},
+                      "points": [point_id], "wait": False}, timeout=3,
+            )
+            if response.status_code not in (200, 404):
+                response.raise_for_status()
+    except Exception as error:
+        log.debug("retrieval.access_update_failed", error=str(error))
 
 
 def should_prime_memory(task: str) -> bool:
@@ -336,7 +345,7 @@ def format_memories_for_context(memories: List[MemoryHit], max_length: int = 800
         if m.raw_similarity < 0.5:
             confidence_marker = " (possibly)"
         
-        lines.append(f"- [{m.category}]{confidence_marker} {m.content}")
+        lines.append(f"- [{m.category}; importance {m.importance:.2f}]{confidence_marker} {m.content}")
     
     result = "\n".join(lines)
     

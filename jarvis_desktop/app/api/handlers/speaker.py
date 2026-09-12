@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import math
 import os
 import shutil
 import tempfile
@@ -18,7 +20,7 @@ async def handle_speaker_profile_status(request):
     try:
         settings = get_settings()
         verifier = SpeakerVerifier()
-        summary = verifier.profile_summary()
+        summary = await asyncio.to_thread(verifier.profile_summary)
         summary.update(
             {
                 "verificationEnabled": settings.speaker_verification_enabled,
@@ -103,7 +105,10 @@ async def handle_speaker_profile_enroll(request):
         if not audio_paths:
             return web.json_response({"success": False, "error": "No enrollment audio received"}, status=400)
 
-        profile: SpeakerProfile = SpeakerVerifier.enroll_from_audio_paths(
+        if not math.isfinite(threshold) or not 0 < threshold < 1:
+            raise ValueError('Threshold must be between 0 and 1')
+
+        profile: SpeakerProfile = await asyncio.to_thread(SpeakerVerifier.enroll_from_audio_paths,
             audio_paths,
             profile_path=profile_path,
             threshold=threshold,
@@ -123,6 +128,8 @@ async def handle_speaker_profile_enroll(request):
                 },
             }
         )
+    except ValueError as e:
+        return web.json_response({'success': False, 'error': str(e)}, status=400)
     except Exception as e:
         print(f"X [BACKEND] Speaker profile enrollment error: {e}")
         return web.json_response({"success": False, "error": str(e)}, status=500)

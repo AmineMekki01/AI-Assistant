@@ -2,7 +2,7 @@ class JarvisAudioProcessor extends AudioWorkletProcessor {
   constructor() {
     super()
     this._buffer = []
-    this._frameSize = 4096
+    this._frameSize = 1024
 
     this.port.onmessage = (event) => {
       const data = event.data

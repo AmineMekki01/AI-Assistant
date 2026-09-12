@@ -364,11 +364,12 @@ export function VoiceTab() {
 
         <p className="section-desc">
           Enroll your voice so JARVIS can recognize you and avoid responding to every nearby voice.
-          If no profile is enrolled, speaker verification cannot tell your voice apart from others.
+          When verification is enabled, voice commands stay blocked until you enroll a profile.
+          Upload or record 10–30 seconds of your normal speaking voice in a quiet room.
         </p>
 
         <div className="status-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
-          <div className="status-item"><span className="status-label">Verification</span><span className={`status-value ${speakerProfile?.verificationEnabled ? 'active' : ''}`}>{speakerProfile?.verificationEnabled ? 'AVAILABLE' : 'NOT ENABLED'}</span></div>
+          <div className="status-item"><span className="status-label">Verification</span><span className={`status-value ${speakerProfile?.verificationEnabled ? 'active' : ''}`}>{speakerProfile?.verificationEnabled ? (speakerProfile.profileExists ? 'ENABLED' : 'AWAITING ENROLLMENT') : 'NOT ENABLED'}</span></div>
           <div className="status-item"><span className="status-label">Profile</span><span className={`status-value ${speakerProfile?.profileExists ? 'active' : ''}`}>{speakerProfile?.profileExists ? 'ENROLLED' : 'EMPTY'}</span></div>
           <div className="status-item"><span className="status-label">Embeddings</span><span className="status-value active">{speakerProfile?.embeddingCount ?? 0}</span></div>
           <div className="status-item"><span className="status-label">Threshold</span><span className="status-value active">{speakerProfile ? speakerProfile.threshold.toFixed(2) : '--'}</span></div>

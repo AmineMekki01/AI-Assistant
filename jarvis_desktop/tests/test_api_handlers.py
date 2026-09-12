@@ -550,6 +550,7 @@ async def test_storage_helpers_and_routes(monkeypatch, temp_home):
     assert storage._chunk_text("") == []
     assert storage._chunk_text("one two") == ["one two"]
 
+    monkeypatch.setattr(storage, 'probe_qdrant_status', lambda: {'connected': False, 'collectionExists': False})
     response = await storage.handle_qdrant_status(FakeRequest())
     assert json.loads(response.text) == {"connected": False, "collectionExists": False}
 

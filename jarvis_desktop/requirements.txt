@@ -17,3 +17,9 @@ google-api-python-client>=2.95.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 pytest-cov>=5.0.0
+# Owner-voice verification (CPU/macOS-compatible versions)
+speechbrain==1.0.3
+torch==2.8.0
+torchaudio==2.8.0
+huggingface-hub>=0.28,<1.0
+soundfile>=0.13,<0.14

@@ -70,7 +70,7 @@ class Orchestrator:
                 log.error("orchestrator.client_init_failed", error=str(e))
                 return "I can't reach my reasoning core right now."
 
-            system_prompt = self._get_system_prompt()
+            system_prompt = await asyncio.to_thread(self._get_system_prompt)
             tool_schemas = self._chat_tool_schemas()
 
             messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -146,9 +146,10 @@ class Orchestrator:
                 return (choice.content or "").strip() or "I'm not sure how to help with that."
 
             tools_called.extend(tc.function.name for tc in tool_calls)
-            results = await asyncio.gather(
-                *(self._execute_tool_call(tc, on_event) for tc in tool_calls)
-            )
+            # Preserve model order for actions that share state (e.g. preview
+            # then confirmation, or play then pause). Concurrent side effects
+            # make the result depend on network timing.
+            results = [await self._execute_tool_call(tc, on_event) for tc in tool_calls]
             for tc, output in results:
                 messages.append({
                     "role": "tool",
@@ -184,7 +185,9 @@ class Orchestrator:
         try:
             args = json.loads(tc.function.arguments or "{}")
         except json.JSONDecodeError:
-            args = {}
+            return tc, "Error: invalid tool arguments; no action was executed."
+        if not isinstance(args, dict):
+            return tc, "Error: tool arguments must be an object; no action was executed."
 
         result = await REGISTRY.call(tool_name, args)
         if result.get("ok"):
@@ -273,11 +276,12 @@ class Orchestrator:
             self._system_prompt = _build_system_prompt()
         return self._system_prompt
 
-    @classmethod
-    def _get_client(cls):
+    def _get_client(self):
         from openai import AsyncOpenAI
 
-        return AsyncOpenAI()
+        if self._client is None:
+            self._client = AsyncOpenAI(timeout=30.0, max_retries=0)
+        return self._client
 
 
 

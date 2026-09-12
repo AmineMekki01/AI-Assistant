@@ -1,6 +1,7 @@
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error'
 
 export interface Message {
+  id?: string
   role: 'assistant' | 'user' | 'system'
   text: string
   timestamp: Date
@@ -13,6 +14,7 @@ export interface BackendStatusMessage {
 }
 
 export interface BackendConversationMessage {
+  id?: string
   type: 'message'
   role: 'assistant' | 'user' | 'system'
   text: string
@@ -44,6 +46,7 @@ export interface BackendVoiceDebugMessage {
 
 export interface BackendMailDraftMessage {
   type: 'mail_draft'
+  cleared?: boolean
   account: 'gmail' | 'zimbra'
   to: string
   subject: string

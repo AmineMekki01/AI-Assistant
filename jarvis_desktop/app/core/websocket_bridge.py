@@ -29,6 +29,7 @@ class WebSocketBridge:
         on_commit: Optional[Callable[[], None]] = None,
         on_recording_start: Optional[Callable[[], None]] = None,
         on_mail_confirmation: Optional[Callable[[dict[str, Any]], None]] = None,
+        on_recording_cancel: Optional[Callable[[], None]] = None,
         host: str = "localhost",
         port: int = 8000
     ):
@@ -39,6 +40,8 @@ class WebSocketBridge:
         self._on_commit = on_commit
         self._on_recording_start = on_recording_start
         self._on_mail_confirmation = on_mail_confirmation
+        self._on_recording_cancel = on_recording_cancel
+        self._recording_client = None
         
         self.clients: set = set()
         self.server: Optional[websockets.Server] = None
@@ -48,6 +51,7 @@ class WebSocketBridge:
         self.audio_buffer: list = []
         self.is_recording = False
         self.is_speaking = False
+        self._assistant_message_id = None
         
     def start(self):
         """Start WebSocket server in background thread."""
@@ -57,10 +61,12 @@ class WebSocketBridge:
         
     def stop(self):
         """Stop the WebSocket server."""
-        if self.server:
-            self.server.close()
-        if self.loop:
+        def shutdown():
+            if self.server:
+                self.server.close()
             self.loop.stop()
+        if self.loop and self.loop.is_running():
+            self.loop.call_soon_threadsafe(shutdown)
             
     def _run_server(self):
         """Run the asyncio event loop with both WebSocket and HTTP servers."""
@@ -121,6 +127,8 @@ class WebSocketBridge:
 
     def _set_recording_state(self, is_recording: bool) -> None:
         self.is_recording = is_recording
+        if not is_recording:
+            self._recording_client = None
         if is_recording:
             self.audio_buffer = []
             if hasattr(self, '_chunk_count'):
@@ -143,6 +151,14 @@ class WebSocketBridge:
         print("🛑 Stopped recording")
         await self._process_recorded_audio()
 
+    async def _handle_set_recording(self, enabled: bool) -> None:
+        if enabled == self.is_recording:
+            # Taking over from native capture still needs to reset the buffer.
+            if enabled and self._on_recording_start:
+                self._on_recording_start()
+            return
+        await self._handle_toggle_recording()
+
     async def _handle_audio_chunk(self, data: dict[str, Any]) -> None:
         if not self.is_recording or not self.on_audio:
             return
@@ -157,7 +173,11 @@ class WebSocketBridge:
             print("⚠️  Ignoring malformed audio chunk")
             return
 
+        if not audio_bytes or len(audio_bytes) % 4 or len(audio_bytes) > 65536:
+            return
         audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
+        if not np.isfinite(audio_array).all():
+            return
         pcm16_bytes = self._float_to_pcm16(audio_array)
 
         if not hasattr(self, '_chunk_count'):
@@ -179,11 +199,13 @@ class WebSocketBridge:
             "state": "connected",
             "message": "J.A.R.V.I.S. SYSTEM ONLINE"
         })
+        await self._send_to_client(websocket, {"type": "recording", "isRecording": self.is_recording})
+        await self._send_to_client(websocket, {"type": "speaking", "isSpeaking": self.is_speaking})
         
         await self._send_to_client(websocket, {
             "type": "message",
             "role": "assistant",
-            "text": "JARVIS systems online and ready. Press and hold the microphone button to speak."
+            "text": "Say Hey Jarvis once, then keep talking after each reply. You can also click the microphone to start and stop a recording."
         })
         
         try:
@@ -193,6 +215,11 @@ class WebSocketBridge:
             pass
         finally:
             self.clients.discard(websocket)
+            if self._recording_client is websocket:
+                self._recording_client = None
+                self.set_recording_state(False)
+                if self._on_recording_cancel:
+                    self._on_recording_cancel()
             print(f"🔴 Frontend disconnected [{client_id}]")
             
     async def _handle_message(self, websocket, message: str):
@@ -206,9 +233,17 @@ class WebSocketBridge:
             msg_type = data.get("type")
 
             if msg_type == "toggle_recording":
+                self._recording_client = websocket
                 await self._handle_toggle_recording()
+            elif msg_type == "set_recording" and isinstance(data.get("isRecording"), bool):
+                if self._recording_client not in (None, websocket):
+                    return
+                enabled = data["isRecording"]
+                self._recording_client = websocket if enabled else None
+                await self._handle_set_recording(enabled)
             elif msg_type == "audio_chunk":
-                await self._handle_audio_chunk(data)
+                if self._recording_client is websocket:
+                    await self._handle_audio_chunk(data)
             elif msg_type == "confirm_mail_draft":
                 await self._handle_mail_confirmation(data)
 
@@ -226,9 +261,6 @@ class WebSocketBridge:
         print(f"🔔 _process_recorded_audio called, has _on_commit: {hasattr(self, '_on_commit')}")
         if not self._on_commit:
             print("⚠️  _on_commit callback not set!")
-            return
-        if not hasattr(self, '_chunk_count') or self._chunk_count == 0:
-            print("⚠️  No audio chunks recorded, skipping commit")
             return
         print("🔔 Calling _on_commit callback...")
         self._on_commit()
@@ -256,10 +288,10 @@ class WebSocketBridge:
         message = json.dumps(data)
         disconnected = set()
         
-        for client in self.clients:
+        for client in tuple(self.clients):
             try:
-                await client.send(message)
-            except websockets.exceptions.ConnectionClosed:
+                await asyncio.wait_for(client.send(message), timeout=2.0)
+            except (websockets.exceptions.ConnectionClosed, asyncio.TimeoutError):
                 disconnected.add(client)
                 
         for client in disconnected:
@@ -271,12 +303,16 @@ class WebSocketBridge:
 
         asyncio.run_coroutine_threadsafe(self.broadcast(data), self.loop)
 
+    def start_assistant_message(self, response_id: str):
+        self._assistant_message_id = response_id
+
     def send_transcript(self, role: str, text: str):
         """Send transcript to all frontend clients."""
         self._broadcast_event({
             "type": "message",
             "role": role,
             "text": text,
+            **({"id": self._assistant_message_id} if role == "assistant" and self._assistant_message_id else {}),
         })
         
     def send_status(self, state: str, message: str):
@@ -313,6 +349,7 @@ class WebSocketBridge:
             "subject": draft.get("subject", ""),
             "body": draft.get("body", ""),
             "rawText": draft.get("rawText", ""),
+            "cleared": bool(draft.get("cleared", False)),
         }
         self._broadcast_event(payload)
         

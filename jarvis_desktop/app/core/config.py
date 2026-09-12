@@ -32,7 +32,7 @@ class Settings:
     """Application settings loaded from environment variables."""
     
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
-    openai_realtime_model: str = os.getenv("OPENAI_REALTIME_MODEL", "gpt-4o-mini-realtime-preview")
+    openai_realtime_model: str = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1-mini")
     openai_realtime_voice: str = os.getenv("OPENAI_REALTIME_VOICE", "ash")
     openai_utility_model: str = os.getenv("OPENAI_UTILITY_MODEL", "gpt-5.4-nano")
     openai_embedding_model: str = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")

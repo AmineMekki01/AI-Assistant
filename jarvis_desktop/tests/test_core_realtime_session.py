@@ -61,7 +61,7 @@ class FakeSessionSocket:
 async def test_build_session_config_uses_configured_voice(monkeypatch):
     monkeypatch.setattr(rs, "load_all_capabilities", lambda: None)
     monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
-        openai_realtime_model="gpt-realtime-mini",
+        openai_realtime_model="gpt-realtime-2.1-mini",
         openai_realtime_voice="ash",
         personal_info={"name": "Amine"},
     ))
@@ -70,23 +70,21 @@ async def test_build_session_config_uses_configured_voice(monkeypatch):
     payload = session._build_session_config([])
 
     assert payload["type"] == "session.update"
-    assert payload["session"]["model"] == "gpt-realtime-mini"
+    assert payload["session"]["model"] == "gpt-realtime-2.1-mini"
     assert payload["session"]["audio"]["output"]["voice"] == "ash"
     turn_detection = payload["session"]["audio"]["input"]["turn_detection"]
-    assert turn_detection["type"] == "server_vad"
-    assert turn_detection["create_response"] is False
-    assert turn_detection["interrupt_response"] is False
+    assert turn_detection is None  # local speech detector is the single turn boundary
     assert "temperature" not in payload["session"]
-    assert payload["session"]["tool_choice"] == "none"
+    assert payload["session"]["tool_choice"] == "auto"
     # The realtime model is a pure voice layer: it only reads text aloud.
     instructions = payload["session"]["instructions"]
     assert "J.A.R.V.I.S." in instructions
-    assert "text-to-speech" in instructions
-    assert "Do not call tools" in instructions
+    assert "registered tools" in instructions
+    assert payload['session']['truncation']['retention_ratio'] == 0.8
 
 
 @pytest.mark.asyncio
-async def test_speak_direct_text_uses_openai_tts_voice(monkeypatch):
+async def test_legacy_tts_helper_cleans_up_playback(monkeypatch):
     monkeypatch.setattr(rs.sys, "platform", "darwin")
     monkeypatch.setattr(rs, "load_all_capabilities", lambda: None)
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -111,9 +109,9 @@ async def test_speak_direct_text_uses_openai_tts_voice(monkeypatch):
         on_speaking=lambda flag: speaking.append(flag),
     )
 
-    await session._speak_direct_text("Here is the briefing")
+    await session._speak_with_openai_tts("Here is the briefing")
 
-    assert transcript == [("assistant", "Here is the briefing")]
+    assert transcript == []
     assert speaking[0] is True
     assert speaking[-1] is False
     assert fake_process.wait_called is True
@@ -126,6 +124,7 @@ async def test_delegate_to_briefing_uses_normal_realtime_pipeline(monkeypatch):
 
     session = rs.RealtimeSession()
     session.ws = FakeSessionSocket()
+    session._configured = True
     session._ws_alive = lambda: True
 
     spoke = []
@@ -201,6 +200,7 @@ async def test_send_user_text_emits_user_message_and_response(monkeypatch):
     monkeypatch.setattr(rs, "load_all_capabilities", lambda: None)
     session = rs.RealtimeSession()
     session.ws = FakeSessionSocket()
+    session._configured = True
     session._ws_alive = lambda: True
 
     await session.send_user_text("yes")

@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 import os
 import threading
+import hashlib
+import tempfile
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +33,8 @@ class SpeakerProfile:
 
 
 class SpeakerVerifier:
+    _classifier_lock = threading.RLock()
+    _classifiers = {}
     _profile_cache_lock = threading.RLock()
     _profile_cache: dict[str, dict[str, object]] = {}
 
@@ -96,7 +102,13 @@ class SpeakerVerifier:
 
         try:
             source = self.model_name or "speechbrain/spkrec-ecapa-voxceleb"
-            self._classifier = EncoderClassifier.from_hparams(source=source)
+            with self._classifier_lock:
+                if source not in self._classifiers:
+                    savedir = Path.home() / '.jarvis' / 'voice' / 'models' / hashlib.sha256(source.encode()).hexdigest()[:16]
+                    self._classifiers[source] = EncoderClassifier.from_hparams(
+                        source=source, savedir=str(savedir), run_opts={'device': 'cpu'})
+                self._classifier = self._classifiers[source]
+            self._load_error = ''
         except Exception as exc:
             self._load_error = f"speechbrain model failed: {exc}"
             return None
@@ -230,6 +242,7 @@ class SpeakerVerifier:
         if cached is not None:
             cached_embedding = cached.get("reference_embedding")
             if isinstance(cached_embedding, np.ndarray):
+                self._profile_threshold = float((cached.get('payload') or {}).get('threshold', self.threshold))
                 self._reference_embedding = cached_embedding.astype(np.float32)
                 self._reference_signature = signature
                 return self._reference_embedding
@@ -237,14 +250,22 @@ class SpeakerVerifier:
         payload = self._load_profile_payload()
         if payload is None:
             return None
+        model = payload.get('model_name')
+        if self.model_name and model and model != self.model_name:
+            self._load_error = 'Speaker profile model changed; please enroll your voice again'
+            return None
+        if not np.isfinite(self._profile_threshold) or not 0 < self._profile_threshold < 1:
+            self._load_error = 'Invalid speaker profile threshold'
+            return None
 
         embeddings = payload.get("embeddings") or []
         vectors: list[np.ndarray] = []
         expected_size: int | None = None
         for embedding in embeddings:
             vector = np.asarray(embedding, dtype=np.float32).reshape(-1)
-            if vector.size == 0:
-                continue
+            if vector.size == 0 or not np.all(np.isfinite(vector)) or np.linalg.norm(vector) == 0:
+                self._load_error = 'Invalid speaker profile embedding'
+                return None
             if expected_size is None:
                 expected_size = int(vector.size)
             elif vector.size != expected_size:
@@ -276,8 +297,7 @@ class SpeakerVerifier:
 
     def _write_profile(self, profile: SpeakerProfile) -> Path:
         self.profile_path.parent.mkdir(parents=True, exist_ok=True)
-        self.profile_path.write_text(
-            json.dumps(
+        encoded = json.dumps(
                 {
                     "version": 1,
                     "model_name": profile.model_name,
@@ -288,7 +308,16 @@ class SpeakerVerifier:
                 indent=2,
                 sort_keys=True,
             )
-        )
+        with tempfile.NamedTemporaryFile(mode='w', dir=self.profile_path.parent, delete=False) as file:
+            temporary = file.name
+            file.write(encoded)
+            file.flush()
+            os.fsync(file.fileno())
+        try:
+            os.replace(temporary, self.profile_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
         self.invalidate_cached_profile(self.profile_path)
         return self.profile_path
 
@@ -306,7 +335,6 @@ class SpeakerVerifier:
         }
 
         if not summary["profileExists"]:
-            summary["loadError"] = f"speaker profile not found at {self.profile_path}"
             return summary
 
         payload = self._load_profile_payload()
@@ -348,6 +376,12 @@ class SpeakerVerifier:
         threshold: float = 0.35,
     ) -> SpeakerProfile:
         verifier = cls(profile_path=profile_path, threshold=threshold)
+        # Explicit profile paths must still use the configured model.
+        if not verifier.model_name:
+            from .config import get_settings
+            verifier.model_name = get_settings().speaker_verification_model_name
+        if not np.isfinite(threshold) or not 0 < threshold < 1:
+            raise ValueError('Threshold must be between 0 and 1')
         classifier = verifier._load_classifier()
         if classifier is None:
             raise RuntimeError(verifier._load_error or "speaker embedding model unavailable")
@@ -359,20 +393,41 @@ class SpeakerVerifier:
             raise RuntimeError(f"speaker enrollment dependencies unavailable: {exc}") from exc
 
         embeddings: list[list[float]] = []
+        errors = []
         for audio_path in audio_paths:
             try:
-                signal, sample_rate = torchaudio.load(str(audio_path))
+                try:
+                    signal, sample_rate = torchaudio.load(str(audio_path))
+                except Exception:
+                    if sys.platform != 'darwin':
+                        raise
+                    # macOS voice memos commonly use AAC/M4A, which the
+                    # soundfile backend cannot decode. Normalize locally.
+                    with tempfile.TemporaryDirectory(prefix='jarvis_voice_decode_') as directory:
+                        wav = str(Path(directory) / 'sample.wav')
+                        subprocess.run(['/usr/bin/afconvert', str(audio_path), wav, '-f', 'WAVE', '-d', 'LEI16@16000', '-c', '1'],
+                                       check=True, timeout=30, capture_output=True)
+                        signal, sample_rate = torchaudio.load(wav)
                 if signal.shape[0] > 1:
                     signal = signal.mean(dim=0, keepdim=True)
                 if sample_rate != 16000:
                     signal = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)(signal)
+                if signal.shape[-1] < 3 * 16000:
+                    raise ValueError('Use at least 3 seconds of clear speech per sample')
+                if signal.shape[-1] > 120 * 16000:
+                    raise ValueError('Use samples shorter than 2 minutes')
+                if not torch.isfinite(signal).all() or float(signal.abs().max()) < 0.001:
+                    raise ValueError('The sample is silent or invalid; record clear speech')
                 embedding = classifier.encode_batch(signal).flatten().detach().cpu().numpy().astype(np.float32)
                 norm = float(np.linalg.norm(embedding))
                 if norm > 0:
                     embedding = embedding / norm
                 embeddings.append(embedding.tolist())
-            except Exception:
-                continue
+            except Exception as error:
+                errors.append(f'{Path(audio_path).name}: {error}')
+
+        if errors:
+            raise ValueError('Could not enroll all samples. ' + '; '.join(errors))
 
         if not embeddings:
             raise RuntimeError("no valid enrollment audio could be loaded")
@@ -390,7 +445,6 @@ class SpeakerVerifier:
         return profile
 
     def verify_audio(self, audio_bytes: bytes) -> SpeakerVerificationResult:
-        print(f"Verifying audio... profile={self.profile_path}")
         if not self.profile_path.exists():
             return SpeakerVerificationResult(active=True, allowed=False, reason="no_speaker_profile")
 
@@ -426,7 +480,7 @@ class SpeakerVerifier:
             self._load_error = f"verification failed: {exc}"
             return SpeakerVerificationResult(active=True, allowed=False, reason=self._load_error)
 
-        allowed = similarity >= self._profile_threshold
+        allowed = bool(np.isfinite(similarity) and similarity >= self._profile_threshold)
         return SpeakerVerificationResult(
             active=True,
             allowed=allowed,

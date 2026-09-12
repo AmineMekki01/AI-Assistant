@@ -65,6 +65,12 @@ class FakeSession:
         self._commit_ack_event = None
         FakeSession.last_instance = self
 
+    async def _ensure_connected(self): return True
+    async def wait_for_turn(self, timeout=120): pass
+    async def begin_audio_turn(self): pass
+    async def discard_audio(self): pass
+    async def send_user_text(self, text): pass
+
     async def connect(self):
         self.connect_called = True
 
@@ -145,8 +151,9 @@ async def test_websocket_bridge_recording_audio_and_message_paths(monkeypatch):
     monkeypatch.setattr(bridge, "_handle_toggle_recording", ignore_toggle)
     monkeypatch.setattr(bridge, "_handle_audio_chunk", fake_handle_audio_chunk)
     await bridge._handle_message(object(), "not-json")
-    await bridge._handle_message(object(), json.dumps({"type": "toggle_recording"}))
-    await bridge._handle_message(object(), json.dumps({"type": "audio_chunk", "data": "abc"}))
+    client = object()
+    await bridge._handle_message(client, json.dumps({"type": "toggle_recording"}))
+    await bridge._handle_message(client, json.dumps({"type": "audio_chunk", "data": "abc"}))
     assert audio_calls[-1] == {"type": "audio_chunk", "data": "abc"}
 
     confirmation_calls = []
@@ -239,7 +246,7 @@ async def test_websocket_bridge_lifecycle_and_factory(monkeypatch):
 
     monkeypatch.setattr(bridge, "_handle_message", fake_handle_message)
     await bridge._handle_client(websocket)
-    assert len(websocket.sent) == 2
+    assert len(websocket.sent) == 4
     assert json.loads(websocket.sent[0])["type"] == "status"
     assert sent_messages == [json.dumps({"type": "toggle_recording"}), json.dumps({"type": "audio_chunk", "data": "abc"})]
     assert websocket not in bridge.clients
@@ -317,6 +324,11 @@ async def test_main_app_session_wiring_and_shutdown(monkeypatch):
             created_sessions.append(self)
             self.tools = []
 
+        async def _ensure_connected(self):
+            await self.connect()
+            await self.configure()
+            return True
+
     monkeypatch.setattr(main, "RealtimeSession", BootstrapSession)
 
     async def fake_sleep(seconds):
@@ -361,7 +373,7 @@ async def test_main_app_session_wiring_and_shutdown(monkeypatch):
     app._on_transcript("assistant", "Hello there")
     app._on_status("ready", "Online")
     app._on_speaking(True)
-    assert app._native_mic_resume_at == float("inf")
+    assert app._native_mic_resume_at == 0.0
 
     app._on_audio(b"abc")
     assert created_sessions[0].appended_audio == []
@@ -371,16 +383,17 @@ async def test_main_app_session_wiring_and_shutdown(monkeypatch):
     app._on_audio(b"outgoing-bytes")
     assert len(bridge.speaking_calls) == previous_speaking_calls + 1
     assert bridge.speaking_calls[-1] is True
-    assert app._native_mic_resume_at == float("inf")
+    assert app._native_mic_resume_at == 0.0
 
     monkeypatch.setattr(main.time, "time", lambda: 100.0)
     app._on_speaking(False)
     bridge.is_speaking = False
 
     app._on_input_audio(b"abc")
-    assert created_sessions[0].appended_audio == [b"abc"]
+    assert created_sessions[0].appended_audio == []  # audio outside a recording is discarded
     assert app.audio_queue.qsize() >= 1
 
+    monkeypatch.setattr(app, "_offer_input", lambda *args: None)
     app._on_commit_audio()
     assert created_sessions[0].commits == 0
     assert app._total_audio_sent == 0
@@ -388,52 +401,15 @@ async def test_main_app_session_wiring_and_shutdown(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_main_routes_user_transcript_through_orchestrator(monkeypatch):
+async def test_user_transcript_is_caption_not_a_second_reasoning_turn(monkeypatch):
     main = importlib.import_module("main")
-
     app = main.JarvisWebSocketApp()
-    spoken = []
-    transcript_calls = []
-    status_calls = []
-    scheduled_tasks = []
-
-    async def fake_speak(text: str, *, await_completion: bool = True, timeout: float = 90.0) -> None:
-        spoken.append(text)
-
-    async def fake_orchestrator_handle(text, *, context="", on_event=None):
-        return f"Orchestrator reply to: {text}"
-
-    def fake_run_coroutine_threadsafe(coro, loop):
-        task = asyncio.create_task(coro)
-        scheduled_tasks.append(task)
-        return SimpleNamespace(add_done_callback=lambda callback: task.add_done_callback(callback))
-
-    monkeypatch.setattr(main.asyncio, "run_coroutine_threadsafe", fake_run_coroutine_threadsafe)
-
-    app.session = SimpleNamespace(speak=fake_speak)
-    app.event_loop = object()
-    app.bridge = SimpleNamespace(
-        send_status=lambda state, message: status_calls.append((state, message)),
-        send_transcript=lambda role, text: transcript_calls.append((role, text)),
-        send_mail_draft=lambda draft: None,
-    )
-
-    monkeypatch.setattr(app.orchestrator, "handle", fake_orchestrator_handle)
-
-    app._on_transcript("user", "What is the price of Bitcoin right now?")
-
-    await asyncio.gather(*scheduled_tasks)
-
-    assert transcript_calls == [
-        ("user", "What is the price of Bitcoin right now?"),
-        ("assistant", "Orchestrator reply to: What is the price of Bitcoin right now?"),
-    ]
-    assert spoken == ["Orchestrator reply to: What is the price of Bitcoin right now?"]
-    assert status_calls == [
-        ("connected", "Thinking…"),
-        ("connected", "J.A.R.V.I.S. SYSTEM ONLINE"),
-    ]
-    assert app._orchestrator_turn_in_progress is False
+    transcripts, dispatched = [], []
+    app.bridge = SimpleNamespace(send_transcript=lambda role, text: transcripts.append((role, text)))
+    monkeypatch.setattr(app, "_dispatch_orchestrator_turn", dispatched.append)
+    app._on_transcript("user", "What time is it?")
+    assert transcripts == [("user", "What time is it?")]
+    assert not dispatched
 
 
 @pytest.mark.asyncio
@@ -571,77 +547,22 @@ def test_native_silence_timeout_adapts_to_longer_speech():
     assert main.JarvisWebSocketApp._native_silence_timeout(5.0) == 2.1
 
 
-def test_main_speaker_verification_rejects_non_enrolled_voice(monkeypatch):
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allowed", [False, True])
+async def test_speaker_verification_gates_realtime_commit(monkeypatch, allowed):
     main = importlib.import_module("main")
-
     app = main.JarvisWebSocketApp()
     app.session = FakeSession()
-    app.event_loop = object()
-    status_calls = []
-    voice_debug_calls = []
-    app.bridge = SimpleNamespace(
-        set_recording_state=lambda flag: None,
-        send_status=lambda state, message: status_calls.append((state, message)),
-        send_voice_debug=lambda payload: voice_debug_calls.append(payload),
-    )
-    app._recording_audio_buffer = [b"chunk-1", b"chunk-2"]
-    app._audio_chunk_count = 2
-    app._total_audio_sent = 14
-    app._native_recording_has_speech = True
-    app._native_voice_armed = True
-    app._native_speech_streak = 2
-    app._speaker_verifier = SimpleNamespace(
-        verify_audio=lambda audio: SimpleNamespace(active=True, allowed=False, similarity=0.12, threshold=0.35)
-    )
-
-    monkeypatch.setattr(main.time, "sleep", lambda seconds: None)
-
-    app._on_commit_audio()
-
-    assert app.session.commits == 0
-    assert app._recording_audio_buffer == []
-    assert app._native_voice_armed is False
-    assert app._native_recording_has_speech is False
-    assert app._total_audio_sent == 0
-    assert app._audio_chunk_count == 0
-    assert status_calls[-1] == ("connected", "Speaker verification rejected — try again")
-    assert voice_debug_calls[-1]["status"] == "speaker_verification_rejected"
-
-
-def test_main_speaker_verification_allows_enrolled_voice(monkeypatch):
-    main = importlib.import_module("main")
-
-    app = main.JarvisWebSocketApp()
-    app.session = FakeSession()
-    app.event_loop = object()
-    app.bridge = SimpleNamespace(set_recording_state=lambda flag: None)
-    app._recording_audio_buffer = [b"chunk-1", b"chunk-2"]
-    app._audio_chunk_count = 2
-    app._total_audio_sent = 14
-    app._native_recording_has_speech = True
-    app._native_voice_armed = True
-    app._speaker_verifier = SimpleNamespace(
-        verify_audio=lambda audio: SimpleNamespace(active=True, allowed=True, similarity=0.84, threshold=0.35)
-    )
-
-    future_calls = []
-
-    def fake_run_coroutine_threadsafe(coro, loop):
-        future_calls.append(loop)
-        asyncio.run(coro)
-        return FakeFuture()
-
-    monkeypatch.setattr(main.asyncio, "run_coroutine_threadsafe", fake_run_coroutine_threadsafe)
-    monkeypatch.setattr(main.time, "sleep", lambda seconds: None)
-
-    app._on_commit_audio()
-
-    assert app.session.commits == 1
-    assert app.session.appended_audio == [b"chunk-1", b"chunk-2"]
-    assert future_calls == [app.event_loop]
-    assert app._recording_audio_buffer == []
-    assert app._total_audio_sent == 0
-    assert app._audio_chunk_count == 0
+    statuses = []
+    app.bridge = SimpleNamespace(send_status=lambda state, text: statuses.append(text))
+    app._speaker_verifier = SimpleNamespace(verify_audio=lambda audio:
+        SimpleNamespace(active=True, allowed=allowed))
+    await app._commit_buffered_audio([b"\0\0" * 4000])
+    assert app.session.commits == int(allowed)
+    assert len(app.session.appended_audio[0]) == 12000
+    if not allowed:
+        assert statuses == ["Speaker verification rejected — try again"]
+    await app._input_stream.close()
 
 
 def test_speaker_verifier_reads_persisted_profile(tmp_path):

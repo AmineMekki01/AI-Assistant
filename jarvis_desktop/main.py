@@ -21,6 +21,8 @@ from dotenv import load_dotenv
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 NATIVE_MIC_RESUME_DELAY_SECONDS = 0.2
+TURN_TIMEOUT_SECONDS = 120.0
+MAX_RECORDING_SECONDS = 120.0
 MUSIC_DUCK_TARGET_VOLUME = 30
 
 env_path = SCRIPT_DIR / ".env"
@@ -34,10 +36,10 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from app.core.realtime_session import RealtimeSession
 from app.core.config import get_settings
+from app.core.voice_input import RealtimeInputStream
 from app.core import music_state
 from app.core.websocket_bridge import create_bridge, get_bridge
 from app.runtime import REGISTRY
-from app.runtime.orchestrator import Orchestrator
 
 
 def is_music_playing(force_refresh: bool = False) -> bool:
@@ -55,6 +57,19 @@ class JarvisWebSocketApp:
         self._native_voice_stop = threading.Event()
         self._native_voice_armed = False
         self._commit_in_progress = False
+        self._commit_lock = threading.Lock()
+        self._turn_lock = threading.Lock()
+        self._pending_turns: deque[str] = deque()
+        self._native_music_playing = False
+        self._frontend_recording = False
+        self._playback_active = False
+        self._speech_active = False
+        self._audio_stop = threading.Event()
+        self._audio_generation = 0
+        self._input_turn_id = 0
+        self._input_stream = RealtimeInputStream(
+            lambda: self.session, self._get_speaker_verifier, self._on_status
+        )
         self._native_voice_last_activity = 0.0
         self._native_recording_started_at = 0.0
         self._native_voice_cooldown_until = 0.0
@@ -84,9 +99,7 @@ class JarvisWebSocketApp:
         self._pending_voice_texts: queue.Queue[str] = queue.Queue()
         self._speaker_verifier = None
 
-        # The orchestrator is the single reasoning core. Every transcribed user
-        # utterance is routed through it; the Realtime model is voice-only.
-        self.orchestrator = Orchestrator()
+        # Realtime owns conversation/reasoning; delegated agents remain registry tools.
         self._orchestrator_turn_in_progress = False
         
         self.audio_queue = queue.Queue()
@@ -227,16 +240,14 @@ class JarvisWebSocketApp:
                     self._speaker_verifier = False
             except Exception as e:
                 print(f"⚠️  [VOICE] Speaker verification unavailable: {e}", flush=True)
-                self._speaker_verifier = False
-                return None
-        return self._speaker_verifier
+                raise RuntimeError('Speaker verification unavailable; voice commands blocked') from e
+        return self._speaker_verifier if self._speaker_verifier is not False else None
 
     def _warm_speaker_verifier_cache(self) -> None:
-        verifier = self._get_speaker_verifier()
-        if verifier is None:
-            return
-
         try:
+            verifier = self._get_speaker_verifier()
+            if verifier is None:
+                return
             warmed = verifier.preload()
             if warmed:
                 print(f"✅ [VOICE] Speaker profile warmed in memory: {verifier.profile_path}", flush=True)
@@ -323,6 +334,7 @@ class JarvisWebSocketApp:
             print("ℹ️  [VOICE] Cannot play activation sound: afplay unavailable", flush=True)
             return False
 
+        process = None
         try:
             volume = os.getenv("JARVIS_ACTIVATION_SOUND_VOLUME", "0.65")
             process = await asyncio.create_subprocess_exec(
@@ -333,11 +345,15 @@ class JarvisWebSocketApp:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await process.wait()
+            await asyncio.wait_for(process.wait(), timeout=10.0)
             return process.returncode == 0
         except Exception as e:
             print(f"⚠️  [VOICE] Activation sound playback failed: {e}", flush=True)
             return False
+        finally:
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
 
     async def _speak_activation_text(self, text: str) -> None:
         if not text:
@@ -469,18 +485,25 @@ class JarvisWebSocketApp:
             return
 
         self._activation_sequence_running = True
-        future = asyncio.run_coroutine_threadsafe(self._run_activation_sequence(trigger), self.event_loop)
+        future = asyncio.run_coroutine_threadsafe(
+            asyncio.wait_for(self._run_activation_sequence(trigger), timeout=45.0), self.event_loop
+        )
 
         def _release(_future):
             self._activation_sequence_running = False
+            try:
+                _future.result()
+            except Exception as e:
+                print(f"⚠️ [VOICE] Activation ended early: {e}", flush=True)
+                self._set_voice_status("connected", "Listening for your request")
 
         future.add_done_callback(_release)
 
     async def _run_activation_sequence(self, trigger: str) -> None:
+        summary_task = sound_task = None
         try:
             voice = self._activation_voice_settings()
             intro_sound_path = voice["introSoundPath"]
-            intro_duration_seconds = 3.0
             self._native_voice_cooldown_until = time.time() + 3.0
             self._native_clap_cooldown_until = time.time() + 2.0
             self._native_voice_armed = False
@@ -527,9 +550,16 @@ class JarvisWebSocketApp:
                 if activation_summary:
                     await self._speak_activation_text(activation_summary)
         finally:
+            pending = [task for task in (summary_task, sound_task) if task is not None and not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             self._activation_sequence_running = False
 
     def _detect_clap_trigger(self, frame_energy: float) -> bool:
+        if get_settings().speaker_verification_enabled:
+            return False  # A clap cannot authenticate the enrolled speaker.
         voice = self._activation_voice_settings()
         if not voice["enabled"] or not voice["clapEnabled"]:
             return False
@@ -665,9 +695,28 @@ class JarvisWebSocketApp:
             return
 
         self._native_voice_stop.clear()
-        self._native_voice_thread = threading.Thread(target=self._native_voice_loop, daemon=True)
+        self._native_voice_thread = threading.Thread(target=self._native_voice_supervisor, daemon=True)
         self._native_voice_thread.start()
+        threading.Thread(target=self._native_voice_housekeeping, daemon=True).start()
         print("🎙️ Native wake-word listener starting", flush=True)
+
+    def _native_voice_supervisor(self) -> None:
+        while not self._native_voice_stop.is_set():
+            self._native_voice_loop()
+            if self._native_voice_stop.wait(3.0):
+                break
+            self._set_voice_status("error", "Reopening microphone and wake-word listener…")
+
+    def _native_voice_housekeeping(self) -> None:
+        # AppleScript can take several seconds. Never run it on the capture loop.
+        while not self._native_voice_stop.is_set():
+            try:
+                self._native_music_playing = is_music_playing()
+                followup = time.time() < self._native_listening_window_until or music_state.voice_followup_override_active()
+                self._update_music_listening_volume(self._native_music_playing, followup)
+            except Exception as e:
+                print(f"⚠️ [VOICE] Music state check failed: {e}", flush=True)
+            self._native_voice_stop.wait(1.0)
 
     def _stop_native_voice_listener(self) -> None:
         self._native_voice_stop.set()
@@ -686,18 +735,24 @@ class JarvisWebSocketApp:
         self._dispatch_orchestrator_turn(cleaned)
 
     def _strip_wake_word(self, transcript: str, wake_word: str) -> str:
-        transcript_norm = self._normalize_wake_word(transcript)
-        wake_norm = self._normalize_wake_word(wake_word)
-        if not transcript_norm:
-            return ""
+        candidates = [wake_word, "hey jarvis", "jarvis"]
+        pattern = r"^(?:" + "|".join(re.escape(word) for word in candidates if word) + r")\b[\s,.:!?—-]*"
+        return re.sub(pattern, "", transcript.strip(), count=1, flags=re.IGNORECASE)
 
-        candidates = [wake_norm, "hey jarvis", "jarvis"]
-        cleaned = transcript_norm
-        for candidate in candidates:
-            if cleaned.startswith(candidate):
-                cleaned = cleaned[len(candidate):].strip()
-                break
-        return cleaned
+    def _update_background_energy(self, energy: float, is_speech: bool) -> None:
+        # Learning speech as noise progressively makes the next turn inaudible.
+        if not is_speech:
+            self._native_background_energy = self._native_background_energy * 0.98 + energy * 0.02
+
+    def _native_speech_flags(self, energy: float, probability: float | None) -> tuple[bool, bool]:
+        if probability is not None:
+            # Speech can be quiet. Model confidence, not loudness, determines
+            # whether a word resets the end-of-utterance timer. A lower hold
+            # threshold avoids cutting off softer words after speech starts.
+            return probability >= 0.25, probability >= 0.5
+        threshold = max(0.0035, self._native_background_energy * 3.5)
+        start_threshold = max(0.008, self._native_background_energy * 5.0, threshold * 1.5)
+        return energy >= threshold, energy >= start_threshold
 
     def _native_voice_loop(self) -> None:
         try:
@@ -712,7 +767,6 @@ class JarvisWebSocketApp:
         voice_settings = self._voice_settings()
         activation_threshold = max(0.2, min(0.8, 1.0 - float(voice_settings.get("sensitivity", 0.5))))
         wake_word = str(voice_settings.get("wakeWord") or "Hey JARVIS")
-        wake_norm = self._normalize_wake_word(wake_word)
 
         print(
             f"🎙️ [VOICE] Starting native wake-word listener | wakeWord={wake_word} threshold={activation_threshold:.2f}",
@@ -727,6 +781,13 @@ class JarvisWebSocketApp:
             download_models()
 
             wake_model = Model(inference_framework="onnx")
+            speech_detector = None
+            try:
+                from openwakeword.vad import VAD
+                speech_detector = VAD()
+                print("🎙️ [VOICE] Silero speech detection ready", flush=True)
+            except Exception as e:
+                print(f"⚠️ [VOICE] Speech detector unavailable; using energy fallback: {e}", flush=True)
             model_names = list(wake_model.models.keys())
             print(f"🧠 [VOICE] openWakeWord models loaded: {', '.join(model_names)}", flush=True)
         except Exception as e:
@@ -737,13 +798,27 @@ class JarvisWebSocketApp:
         p = None
         stream = None
         chunk_size = 1280
-        speech_threshold_floor = 0.0035
-        speech_threshold_multiplier = 3.5
-        speech_start_threshold_floor = 0.008
-        speech_start_threshold_multiplier = 5.0
         min_recording_duration = 0.65
         listen_window_seconds = 300.0  # 5 minutes follow-up window
         speech_frames_required = 3
+
+        captured_audio = queue.Queue(maxsize=4)
+
+        def capture(in_data, frame_count, time_info, status):
+            # PortAudio keeps draining the device even while detection is paused.
+            # Bound latency; old frames must never be replayed as a new request.
+            try:
+                captured_audio.put_nowait((time.monotonic(), in_data))
+            except queue.Full:
+                try:
+                    captured_audio.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    captured_audio.put_nowait((time.monotonic(), in_data))
+                except queue.Full:
+                    pass
+            return (None, pyaudio.paContinue)
 
         try:
             p = pyaudio.PyAudio()
@@ -753,6 +828,7 @@ class JarvisWebSocketApp:
                 rate=16000,
                 input=True,
                 frames_per_buffer=chunk_size,
+                stream_callback=capture,
             )
             print("🎙️ [VOICE] Microphone stream opened (16kHz mono)", flush=True)
         except Exception as e:
@@ -764,15 +840,28 @@ class JarvisWebSocketApp:
 
         self._set_voice_status("connected", f'Wake word armed — say "{wake_word}"')
         self._native_voice_started_at = time.time()
+        last_capture_at = time.monotonic()
 
         try:
             while not self._native_voice_stop.is_set():
-                music_playing = is_music_playing()
+                try:
+                    captured_at, raw_audio = captured_audio.get(timeout=0.25)
+                except queue.Empty:
+                    if not stream.is_active() or time.monotonic() - last_capture_at > 2.0:
+                        raise RuntimeError("Microphone stream stopped")
+                    continue
+                last_capture_at = time.monotonic()
+                if time.monotonic() - captured_at > 0.3:
+                    continue
+                music_playing = self._native_music_playing
                 shared_music_override_active = music_state.voice_followup_override_active()
                 in_listening_window = time.time() < self._native_listening_window_until
                 allow_passive_followup = in_listening_window or shared_music_override_active
 
-                self._update_music_listening_volume(music_playing, allow_passive_followup)
+                if self._frontend_recording:
+                    self._native_pre_roll_audio.clear()
+                    self._native_speech_streak = 0
+                    continue
 
                 if self._activation_sequence_running:
                     self._send_voice_debug(
@@ -782,7 +871,8 @@ class JarvisWebSocketApp:
                         allow_passive_followup=False,
                         skip_reason="Activation sequence running",
                     )
-                    time.sleep(0.05)
+                    self._native_pre_roll_audio.clear()
+                    self._native_speech_streak = 0
                     continue
 
                 if self.bridge and self.bridge.is_speaking:
@@ -797,7 +887,8 @@ class JarvisWebSocketApp:
                     if self._native_voice_armed:
                         print("🔇 [VOICE] JARVIS speaking — aborting recording", flush=True)
                         self._reset_native_recording_state()
-                    time.sleep(0.05)
+                    self._native_pre_roll_audio.clear()
+                    self._native_speech_streak = 0
                     continue
 
                 if time.time() < self._native_mic_resume_at:
@@ -810,14 +901,8 @@ class JarvisWebSocketApp:
                         allow_passive_followup=False,
                         skip_reason="Mic resume delay",
                     )
-                    time.sleep(0.05)
-                    continue
-
-                try:
-                    raw_audio = stream.read(chunk_size, exception_on_overflow=False)
-                except Exception as e:
-                    print(f"⚠️  [VOICE] Mic read error: {e}", flush=True)
-                    time.sleep(0.1)
+                    self._native_pre_roll_audio.clear()
+                    self._native_speech_streak = 0
                     continue
 
                 self._native_voice_frame_count += 1
@@ -845,18 +930,6 @@ class JarvisWebSocketApp:
                         )
                         continue
 
-                    seconds_since_output = time.time() - self._jarvis_last_output_at
-                    if seconds_since_output < 1.0:
-                        self._trace_native_voice_skip(f"Waiting after assistant output ({1.0 - seconds_since_output:.2f}s left)")
-                        self._send_voice_debug(
-                            status="post_assistant_output",
-                            armed=self._native_voice_armed,
-                            music_playing=music_playing,
-                            allow_passive_followup=allow_passive_followup,
-                            skip_reason="Waiting after assistant output",
-                        )
-                        continue
-
                     if not self._native_voice_armed:
                         if allow_passive_followup:
                             self._trace_native_voice_skip("Passive follow-up listening")
@@ -878,19 +951,18 @@ class JarvisWebSocketApp:
                             )
 
                     frame_energy = float(np.mean(np.abs(audio.astype(np.float32))) / 32768.0)
-                    dynamic_threshold = max(
-                        speech_threshold_floor,
-                        self._native_background_energy * speech_threshold_multiplier,
-                    )
-                    speech_start_threshold = max(
-                        speech_start_threshold_floor,
-                        self._native_background_energy * speech_start_threshold_multiplier,
-                        dynamic_threshold * 1.5,
-                    )
-                    is_speech_frame = frame_energy >= dynamic_threshold
-                    is_start_speech_frame = frame_energy >= speech_start_threshold
+                    speech_probability = None
+                    if speech_detector is not None:
+                        try:
+                            speech_probability = float(speech_detector.predict(audio, frame_size=640))
+                        except Exception as e:
+                            print(f"⚠️ [VOICE] Speech detector failed; using energy fallback: {e}", flush=True)
+                            speech_detector = None
+                    is_speech_frame, is_start_speech_frame = self._native_speech_flags(frame_energy, speech_probability)
 
                     if not self._native_voice_armed and not allow_passive_followup:
+                        self._native_pre_roll_audio.append(raw_audio)
+                        self._update_background_energy(frame_energy, is_speech_frame)
                         if not self._music_blocks_clap_trigger(music_playing) and self._detect_clap_trigger(frame_energy):
                             print("👏 [VOICE] Clap detected — activating assistant", flush=True)
                             self._send_voice_debug(
@@ -933,7 +1005,22 @@ class JarvisWebSocketApp:
                                 allow_passive_followup=False,
                                 skip_reason="Wake word trigger detected",
                             )
-                            self._trigger_activation_sequence("wake_word")
+                            # Preserve "Hey Jarvis, <command>" in one breath.
+                            # A greeting here used to mute and discard the command.
+                            self._native_voice_armed = True
+                            self._native_recording_has_speech = True
+                            self._native_recording_started_at = time.time()
+                            self._native_voice_last_activity = time.time()
+                            self._native_listening_window_until = time.time() + listen_window_seconds
+                            self._recording_audio_buffer = list(self._native_pre_roll_audio)
+                            self._audio_chunk_count = len(self._recording_audio_buffer)
+                            self._total_audio_sent = sum(map(len, self._recording_audio_buffer))
+                            self._native_pre_roll_audio.clear()
+                            self._start_input_stream(self._recording_audio_buffer)
+                            wake_model.reset()
+                            if self.bridge:
+                                self.bridge.set_recording_state(True)
+                            self._set_voice_status("connected", "Wake word detected — listening for your request")
                             self._native_last_frame_energy = frame_energy
                             continue
 
@@ -945,19 +1032,12 @@ class JarvisWebSocketApp:
 
                         if is_start_speech_frame:
                             self._native_voice_last_activity = time.time()
-                            self._native_background_energy = (
-                                self._native_background_energy * 0.99
-                            ) + (frame_energy * 0.01)
                             self._native_speech_streak += 1
                         elif is_speech_frame:
-                            self._native_background_energy = (
-                                self._native_background_energy * 0.995
-                            ) + (frame_energy * 0.005)
+                            self._update_background_energy(frame_energy, is_speech_frame)
                             self._native_speech_streak = max(0, self._native_speech_streak - 1)
                         else:
-                            self._native_background_energy = (
-                                self._native_background_energy * 0.995
-                            ) + (frame_energy * 0.005)
+                            self._update_background_energy(frame_energy, is_speech_frame)
                             self._native_speech_streak = 0
 
                         if self._native_speech_streak >= speech_frames_required:
@@ -969,6 +1049,7 @@ class JarvisWebSocketApp:
                             self._audio_chunk_count = len(self._recording_audio_buffer)
                             self._total_audio_sent = sum(len(chunk) for chunk in self._recording_audio_buffer)
                             self._native_pre_roll_audio.clear()
+                            self._start_input_stream(self._recording_audio_buffer)
                             print("🟡 [VOICE] Speech detected — starting native recording", flush=True)
                             self._set_voice_status("connected", "Listening — speak your command")
                             if self.bridge:
@@ -979,13 +1060,8 @@ class JarvisWebSocketApp:
                     if is_speech_frame:
                         self._native_voice_last_activity = time.time()
                         self._native_recording_has_speech = True
-                        self._native_background_energy = (
-                            self._native_background_energy * 0.99
-                        ) + (frame_energy * 0.01)
                     else:
-                        self._native_background_energy = (
-                            self._native_background_energy * 0.995
-                        ) + (frame_energy * 0.005)
+                        self._update_background_energy(frame_energy, is_speech_frame)
 
                     if self.bridge and self.bridge.is_recording:
                         self._on_input_audio(raw_audio)
@@ -994,7 +1070,7 @@ class JarvisWebSocketApp:
                     silence_timeout = self._native_silence_timeout(recording_duration)
                     silence_duration = time.time() - self._native_voice_last_activity
 
-                    if recording_duration >= min_recording_duration and silence_duration >= silence_timeout:
+                    if recording_duration >= MAX_RECORDING_SECONDS or (recording_duration >= min_recording_duration and silence_duration >= silence_timeout):
                         if not self._native_recording_has_speech:
                             print("🛑 [VOICE] Silence detected without confirmed speech — discarding native buffer", flush=True)
                             if self.bridge:
@@ -1059,6 +1135,7 @@ class JarvisWebSocketApp:
             on_audio=self._on_input_audio,
             on_commit=self._on_commit_audio,
             on_recording_start=self._on_recording_start,
+            on_recording_cancel=self._on_recording_cancel,
             on_mail_confirmation=self.confirm_mail_draft,
             host="localhost",
             port=8000
@@ -1091,19 +1168,26 @@ class JarvisWebSocketApp:
     def stop(self):
         """Stop the application."""
         self._stop_native_voice_listener()
+        self._audio_stop.set()
         self._update_music_listening_volume(False, False)
         self._stop_reminder_poller()
         if self.bridge:
             self.bridge.stop()
         if self.session and self.event_loop:
             future = asyncio.run_coroutine_threadsafe(
-                self.session.close(),
+                self._close_voice(),
                 self.event_loop
             )
             try:
                 future.result(timeout=5)
             except:
                 pass
+
+    async def _close_voice(self):
+        from app.tools.memory import stop_memory_writer
+        await stop_memory_writer()
+        await self._input_stream.close()
+        await self.session.close()
                 
     def _start_session(self):
         """Start Realtime API session in background thread."""
@@ -1116,7 +1200,8 @@ class JarvisWebSocketApp:
         asyncio.set_event_loop(self.event_loop)
         
         try:
-            self.event_loop.run_until_complete(self._connect_session())
+            self.event_loop.create_task(self._connect_session())
+            self.event_loop.run_forever()
         except Exception as e:
             print(f"X Session error: {e}")
             import traceback
@@ -1125,16 +1210,17 @@ class JarvisWebSocketApp:
     async def _connect_session(self):
         """Connect to Realtime API."""
         try:
-            self.session = RealtimeSession(
-                on_transcript=self._on_transcript,
-                on_audio=self._on_audio,
-                on_status=self._on_status,
-                on_speaking=self._on_speaking,
-                on_mail_draft=self._on_mail_draft,
-            )
-            
-            await self.session.connect()
-            await self.session.configure()
+            if self.session is None:
+                self.session = RealtimeSession(
+                    on_transcript=self._on_transcript,
+                    on_audio=self._on_audio,
+                    on_status=self._on_status,
+                    on_speaking=self._on_speaking,
+                    on_mail_draft=self._on_mail_draft,
+                    on_response_start=lambda response_id: self.bridge.start_assistant_message(response_id) if self.bridge else None,
+                )
+            if not await self.session._ensure_connected():
+                raise ConnectionError("Realtime voice unavailable")
             
             if self.bridge:
                 self.bridge.send_status("connected", "J.A.R.V.I.S. SYSTEM ONLINE")
@@ -1151,13 +1237,18 @@ class JarvisWebSocketApp:
             except Exception as e:
                 print(f"⚠️  Could not schedule music library pre-warm: {e}")
 
-            while True:
-                await asyncio.sleep(1)
+            while not self._audio_stop.is_set():
+                await asyncio.sleep(60)
                 
         except Exception as e:
             print(f"X Connection error: {e}")
             if self.bridge:
                 self.bridge.send_status("error", str(e))
+            if not self._audio_stop.is_set():
+                # Keep capture/control scheduling alive while voice reconnects.
+                asyncio.get_running_loop().call_later(
+                    3.0, lambda: asyncio.create_task(self._connect_session())
+                )
 
     def _drain_pending_voice_texts(self) -> None:
         """Send any speech captured before the realtime session was ready."""
@@ -1173,11 +1264,7 @@ class JarvisWebSocketApp:
 
             drained += 1
             print(f"📨 [VOICE] Flushing queued speech: {text}", flush=True)
-            future = asyncio.run_coroutine_threadsafe(self.session.send_user_text(text), self.event_loop)
-            try:
-                future.result(timeout=5)
-            except Exception as e:
-                print(f"⚠️  [VOICE] Error flushing queued speech: {e}", flush=True)
+            self._send_text_to_session(text)
 
         if drained:
             print(f"✅ [VOICE] Flushed {drained} queued utterance(s)", flush=True)
@@ -1306,7 +1393,6 @@ class JarvisWebSocketApp:
             self._last_user_transcript = text
             if self.bridge:
                 self.bridge.send_transcript(role, text)
-            self._dispatch_orchestrator_turn(text)
             return
 
         if self.bridge:
@@ -1317,51 +1403,47 @@ class JarvisWebSocketApp:
         cleaned = (text or "").strip()
         if not cleaned or not self.event_loop:
             return
-        if self._orchestrator_turn_in_progress:
-            print("⚠️  [ORCH] Turn already in progress - ignoring overlapping transcript", flush=True)
-            return
-
-        self._orchestrator_turn_in_progress = True
+        with self._turn_lock:
+            if self._orchestrator_turn_in_progress:
+                if len(self._pending_turns) < 4:
+                    self._pending_turns.append(cleaned)
+                    if self.bridge:
+                        self.bridge.send_status("connected", "Request queued — I'll answer it next")
+                elif self.bridge:
+                    self.bridge.send_status("connected", "Request queue full — please wait for my reply")
+                return
+            self._orchestrator_turn_in_progress = True
         future = asyncio.run_coroutine_threadsafe(
             self._run_orchestrator_turn(cleaned), self.event_loop
         )
 
-        def _release(_future):
-            self._orchestrator_turn_in_progress = False
+        def _release(done):
+            try:
+                done.result()
+            except Exception as e:
+                print(f"⚠️ [ORCH] Turn failed: {e}", flush=True)
+            with self._turn_lock:
+                self._orchestrator_turn_in_progress = False
+                pending = self._pending_turns.popleft() if self._pending_turns else None
+                # Reserve the next turn before releasing the lock.
+                if pending:
+                    self._orchestrator_turn_in_progress = True
+            if pending:
+                next_future = asyncio.run_coroutine_threadsafe(
+                    self._run_orchestrator_turn(pending), self.event_loop
+                )
+                next_future.add_done_callback(_release)
 
         future.add_done_callback(_release)
 
     async def _run_orchestrator_turn(self, text: str) -> None:
-        """Run the orchestrator on one utterance, then speak the reply."""
-        reply = ""
-        try:
-            if self.bridge:
-                self.bridge.send_status("connected", "Thinking…")
-            reply = await self.orchestrator.handle(text, on_event=self._on_orchestrator_event)
-        except Exception as e:
-            print(f"⚠️  [ORCH] Orchestrator failed: {e}", flush=True)
-            reply = "Sorry, something went wrong while I was working on that."
-        finally:
-            if self.bridge:
-                self.bridge.send_status("connected", "J.A.R.V.I.S. SYSTEM ONLINE")
-
-        reply = (reply or "").strip()
-        if not reply:
-            return
-
-        # Always push the text to the UI transcript panel, even if the session
-        # isn't ready to speak yet (e.g. during startup).
-        if self.bridge:
-            self.bridge.send_transcript("assistant", reply)
-
+        """Inject a typed/control request into the same streamed conversation."""
         if self.session is None:
-            print(f"ℹ️  [ORCH] Session not ready, reply queued for display only: {reply[:120]}")
+            self._on_status("error", "Voice connection is starting — please retry")
             return
-
-        try:
-            await self.session.speak(reply)
-        except Exception as e:
-            print(f"⚠️  [ORCH] speak failed: {e}", flush=True)
+        await self.session.wait_for_turn(timeout=120)
+        await self.session.send_user_text(text)
+        await self.session.wait_for_turn(timeout=120)
 
     def _on_orchestrator_event(self, kind: str, payload: dict) -> None:
         """Surface orchestrator side-effects (mail drafts, status) to the UI."""
@@ -1384,17 +1466,30 @@ class JarvisWebSocketApp:
 
     def _on_speaking(self, is_speaking: bool):
         """Handle speaking-state updates from the realtime session."""
+        self._speech_active = is_speaking
+        self._publish_speaking_state()
+
+    def _set_playback_active(self, active: bool) -> None:
+        self._playback_active = active
+        self._publish_speaking_state()
+
+    def _publish_speaking_state(self) -> None:
+        is_speaking = self._speech_active or self._playback_active
         if self.bridge:
             self.bridge.set_speaking_state(is_speaking)
         if not is_speaking:
             self._jarvis_last_output_at = time.time()
             self._native_mic_resume_at = time.time() + NATIVE_MIC_RESUME_DELAY_SECONDS
+            self._native_listening_window_until = time.time() + 300.0
         else:
-            self._native_mic_resume_at = float("inf")
+            # The speaking flag owns the mute. Never leave an infinite second
+            # gate behind when playback is interrupted or fails.
+            self._native_mic_resume_at = 0.0
 
     def _on_mail_draft(self, draft: dict):
         """Handle structured mail drafts from the realtime session."""
-        print("[mail_draft] preview ready")
+        self._mail_draft_pending = not draft.get('cleared', False)
+        self._last_mail_draft_raw_text = draft.get('rawText', '')
 
         if self.bridge:
             self.bridge.send_mail_draft(draft)
@@ -1405,55 +1500,23 @@ class JarvisWebSocketApp:
             self._clear_audio_queue()
             return
 
-        if self.bridge:
-            if not self.bridge.is_speaking:
-                self._on_speaking(True)
-            
+        self._set_playback_active(True)
         self.audio_queue.put(audio_bytes)
         self._jarvis_last_output_at = time.time()
         
     def _on_input_audio(self, audio_bytes: bytes):
-        """Handle audio INPUT from frontend (user speaking) - send to OpenAI."""
-        if self.bridge and self.bridge.is_recording:
-            self._recording_audio_buffer.append(audio_bytes)
-            self._audio_chunk_count += 1
-            if self._audio_chunk_count <= 5 or self._audio_chunk_count % 20 == 0:
-                print(f"🧠 [AUDIO] Buffered chunk #{self._audio_chunk_count} until recording stops")
+        """Collect 16 kHz PCM for the current recording only."""
+        if not (self.bridge and self.bridge.is_recording):
             return
-
-        if not self.session or not self.event_loop:
-            print("⚠️  [AUDIO] Session not ready, dropping audio")
+        if self._total_audio_sent + len(audio_bytes) > int(MAX_RECORDING_SECONDS * 16000 * 2):
+            self.bridge.set_recording_state(False)
+            self._native_voice_armed = False
+            self._on_commit_audio()
             return
-
-        if self.bridge and self.bridge.is_speaking:
-            print(f"🔇 [AUDIO] JARVIS speaking, dropping {len(audio_bytes)} bytes")
-            return
-            
-        if not hasattr(self, '_total_audio_sent'):
-            self._total_audio_sent = 0
-            self._audio_chunk_count = 0
-            print(f"🎵 [AUDIO] First chunk received: {len(audio_bytes)} bytes")
-        
-        self._total_audio_sent += len(audio_bytes)
+        self._recording_audio_buffer.append(audio_bytes)
         self._audio_chunk_count += 1
-        
-        if self._audio_chunk_count <= 5 or self._audio_chunk_count % 20 == 0:
-            print(f"📥 [AUDIO] Chunk #{self._audio_chunk_count}: {len(audio_bytes)} bytes (total: {self._total_audio_sent})")
-
-        if self.bridge and self.bridge.is_recording:
-            self._recording_audio_buffer.append(audio_bytes)
-            if self._audio_chunk_count <= 5 or self._audio_chunk_count % 20 == 0:
-                print(f"🧠 [AUDIO] Buffered chunk #{self._audio_chunk_count} until recording stops")
-            return
-            
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                self.session.append_audio(audio_bytes),
-                self.event_loop
-            )
-            future.result(timeout=0.5)
-        except Exception as e:
-            print(f"X [AUDIO] Error sending chunk #{self._audio_chunk_count}: {e}")
+        self._total_audio_sent += len(audio_bytes)
+        self._offer_input('audio', audio_bytes)
 
     @staticmethod
     def _pcm16_to_wav(pcm16_bytes: bytes, sample_rate: int = 16000, channels: int = 1) -> bytes:
@@ -1466,114 +1529,37 @@ class JarvisWebSocketApp:
             wf.writeframes(pcm16_bytes)
         return buf.getvalue()
 
+    def _offer_input(self, kind: str, audio: bytes = b'') -> None:
+        if self.event_loop is not None:
+            self.event_loop.call_soon_threadsafe(self._input_stream.offer, kind, self._input_turn_id, audio)
+
+    def _start_input_stream(self, chunks=()) -> None:
+        self._input_turn_id += 1
+        self._offer_input('start')
+        for chunk in chunks:
+            self._offer_input('audio', chunk)
+
     async def _commit_buffered_audio(self, buffered_chunks):
-        if self.session._commit_ack_event is not None:
-            self.session._commit_ack_event.clear()
+        """Compatibility path for pre-buffered callers; uses the same voice model."""
+        self._input_turn_id += 1
+        turn = self._input_turn_id
+        self._input_stream.offer('start', turn)
         for chunk in buffered_chunks:
-            await self.session.append_audio(chunk)
-        await asyncio.sleep(0.3)
-        await self.session.commit_audio()
+            self._input_stream.offer('audio', turn, chunk)
+        self._input_stream.offer('end', turn)
+        await self._input_stream._queue.join()
 
-
-        raw_audio = b"".join(buffered_chunks)
-        if len(raw_audio) < 6400:  # ~200ms
-            return
-
-        try:
-            from openai import AsyncOpenAI
-            client = AsyncOpenAI()
-            wav_bytes = self._pcm16_to_wav(raw_audio)
-            resp = await client.audio.transcriptions.create(
-                file=("audio.wav", io.BytesIO(wav_bytes)),
-                model="whisper-1",
-            )
-            transcript = (resp.text or "").strip()
-            if transcript:
-                print(f"🎤 WHISPER_TRANSCRIPT | {transcript}")
-                self._on_transcript("user", transcript)
-        except Exception as e:
-            print(f"⚠️  Whisper transcription failed: {e}")
-            
     def _on_commit_audio(self):
-        """Commit audio buffer when user stops recording."""
-        if self._commit_in_progress:
-            print("⚠️  Commit already in progress, skipping duplicate")
-            return
-        self._commit_in_progress = True
-        try:
-            if self.session and self.event_loop:
-                total_sent = getattr(self, '_total_audio_sent', 0)
-                chunk_count = getattr(self, '_audio_chunk_count', 0)
-                print(f"🎯 Preparing to commit... received {chunk_count} chunks, {total_sent} bytes")
-                
-                import time
-                time.sleep(0.2)
-                
-                new_count = getattr(self, '_audio_chunk_count', 0)
-                if new_count > chunk_count:
-                    print(f"📥 Received {new_count - chunk_count} more chunks during wait")
-                
-                print(f"🎯 Committing audio buffer... (total: {new_count} chunks)")
-
-                buffered_chunks = list(self._recording_audio_buffer)
-                self._recording_audio_buffer = []
-                if not buffered_chunks:
-                    print("⚠️  No buffered audio to commit")
-                    self._total_audio_sent = 0
-                    self._audio_chunk_count = 0
-                    return
-
-            verifier = self._get_speaker_verifier()
-            if verifier is not None:
-                verification = verifier.verify_audio(b"".join(buffered_chunks))
-                if verification.active and not verification.allowed:
-                    similarity_text = "n/a" if verification.similarity is None else f"{verification.similarity:.2f}"
-                    threshold_text = "n/a" if verification.threshold is None else f"{verification.threshold:.2f}"
-                    print(
-                        f"🚫 [VOICE] Speaker verification failed (similarity={similarity_text}, threshold={threshold_text}) — discarding recording",
-                        flush=True,
-                    )
-                    self._reset_native_recording_state()
-                    self._native_voice_cooldown_until = time.time() + 1.0
-                    self._native_listening_window_until = time.time() + 300.0
-                    if self.bridge:
-                        self.bridge.send_status("connected", "Speaker verification rejected — try again")
-                        self.bridge.send_voice_debug({
-                            "status": "speaker_verification_rejected",
-                            "armed": False,
-                            "musicPlaying": False,
-                            "passiveFollowup": False,
-                            "recording": False,
-                            "skipReason": "Speaker verification rejected",
-                            "cooldownRemaining": 1.0,
-                            "micResumeRemaining": 0.0,
-                            "listenWindowRemaining": 0.0,
-                        })
-                    return
-                if verification.active:
-                    similarity_text = "n/a" if verification.similarity is None else f"{verification.similarity:.2f}"
-                    threshold_text = "n/a" if verification.threshold is None else f"{verification.threshold:.2f}"
-                    print(
-                        f"✅ [VOICE] Speaker verification passed (similarity={similarity_text}, threshold={threshold_text})",
-                        flush=True,
-                    )
-
-            future = asyncio.run_coroutine_threadsafe(
-                self._commit_buffered_audio(buffered_chunks),
-                self.event_loop
-            )
-            try:
-                future.result(timeout=5)
-            except Exception as e:
-                print(f"⚠️  Error committing audio: {e}")
-
-            self._total_audio_sent = 0
-            self._audio_chunk_count = 0
-        finally:
-            self._commit_in_progress = False
+        """Commit the already-streamed recording without blocking capture."""
+        self._frontend_recording = False
+        self._recording_audio_buffer = []
+        self._total_audio_sent = 0
+        self._audio_chunk_count = 0
+        self._offer_input('end')
 
     def _clear_audio_queue(self):
         """Drop any queued assistant audio when the user interrupts."""
+        self._audio_generation += 1
         cleared = 0
         while True:
             try:
@@ -1582,15 +1568,20 @@ class JarvisWebSocketApp:
             except queue.Empty:
                 break
 
+        self._set_playback_active(False)
         if cleared:
             print(f"🧹 Cleared {cleared} queued audio chunk(s)")
     
     def _on_recording_start(self):
         """Reset state when recording starts."""
         print("🔄 Recording started - resetting response state")
+        self._frontend_recording = True
+        self._native_voice_armed = False
+        self._native_pre_roll_audio.clear()
+        self._native_speech_streak = 0
         self._recording_audio_buffer = []
-        self._last_mail_draft_raw_text = ""
-        self._mail_draft_pending = False
+        self._audio_chunk_count = 0
+        self._total_audio_sent = 0
         if self.session:
             future = asyncio.run_coroutine_threadsafe(
                 self.session.interrupt_active_response(),
@@ -1605,10 +1596,17 @@ class JarvisWebSocketApp:
             if self._speaking_timer:
                 self._speaking_timer.cancel()
                 self._speaking_timer = None
-            self.bridge.set_speaking_state(False)
+            self._on_speaking(False)
+            self._native_mic_resume_at = 0.0
             print("🔊 Speaking state cleared - ready for input")
 
         self._clear_audio_queue()
+        self._start_input_stream()
+
+    def _on_recording_cancel(self):
+        self._offer_input('cancel')
+        self._frontend_recording = False
+        self._reset_native_recording_state()
 
     async def _send_confirmed_mail_draft(self, draft: dict):
         """Send the edited mail draft directly through the registry."""
@@ -1639,6 +1637,8 @@ class JarvisWebSocketApp:
 
     def confirm_mail_draft(self, payload: dict | bool = True):
         """Confirm or cancel a pending mail draft from the UI."""
+        if not self._mail_draft_pending:
+            return
         if not self.session or not self.event_loop:
             print("⚠️  [MAIL] Session not ready for confirmation")
             return
@@ -1651,6 +1651,8 @@ class JarvisWebSocketApp:
             draft = None
 
         self._mail_draft_pending = False
+        if self.bridge:
+            self.bridge.send_mail_draft({'cleared': True})
 
         if not accepted:
             self._last_mail_draft_raw_text = ""
@@ -1738,54 +1740,45 @@ class JarvisWebSocketApp:
                 time.sleep(0.5)
 
     def _audio_player_thread(self):
-        """Play audio from queue with buffering for smooth playback."""
+        while not self._audio_stop.is_set():
+            self._audio_player_loop()
+            if self._audio_stop.wait(1.0):
+                break
+
+    def _audio_player_loop(self):
+        """Only the PCM player can release its playback mute; TTS owns its own."""
+        p = stream = None
         try:
             import pyaudio
-            import time
-            
             p = pyaudio.PyAudio()
-            
-            stream = p.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=24000,
-                output=True,
-                frames_per_buffer=2048
-            )
-            
+            stream = p.open(format=pyaudio.paInt16, channels=1, rate=24000,
+                            output=True, frames_per_buffer=2048)
             print("🔊 Audio output ready")
-            
-            audio_buffer = bytearray()
-            min_buffer_size = 4800
-            idle_clear_seconds = 1.0
-            
-            while True:
+            while not self._audio_stop.is_set():
                 try:
                     audio_chunk = self.audio_queue.get(timeout=0.05)
-                    audio_buffer.extend(audio_chunk)
-                    
-                    while len(audio_buffer) >= min_buffer_size:
-                        write_size = min(len(audio_buffer), 4800)
-                        stream.write(bytes(audio_buffer[:write_size]))
-                        audio_buffer = audio_buffer[write_size:]
-                        
+                    generation = self._audio_generation
+                    for offset in range(0, len(audio_chunk), 4800):
+                        if generation != self._audio_generation:
+                            break
+                        stream.write(audio_chunk[offset:offset + 4800])
                 except queue.Empty:
-                    if len(audio_buffer) > 0:
-                        stream.write(bytes(audio_buffer))
-                        audio_buffer = bytearray()
-                    if (
-                        self.bridge
-                        and self.bridge.is_speaking
-                        and len(audio_buffer) == 0
-                        and (time.time() - self._jarvis_last_output_at) >= idle_clear_seconds
-                    ):
-                        self._on_speaking(False)
-                    continue
-                    
+                    response_active = bool(self.session and getattr(self.session, "_response_active", False))
+                    if self._playback_active and not response_active:
+                        self._set_playback_active(False)
         except Exception as e:
-            print(f"X Audio error: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"⚠️ Audio output failed; reopening device: {e}", flush=True)
+            self._clear_audio_queue()
+        finally:
+            self._set_playback_active(False)
+            if stream is not None:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
+            if p is not None:
+                p.terminate()
 
 
 def main():
