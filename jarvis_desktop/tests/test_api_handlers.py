@@ -457,6 +457,20 @@ async def test_dashboard_health_aggregates_cached_statuses(temp_home, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_dashboard_health_exposes_apple_calendar_on_fresh_macos_setup(temp_home, monkeypatch):
+    """A missing probe cache must not disable the macOS Calendar integration."""
+    monkeypatch.setattr(health.Path, "home", lambda: temp_home)
+    monkeypatch.setattr(health.sys, "platform", "darwin")
+    _install_fake_qdrant_modules(monkeypatch, FakeQdrantClient)
+
+    response = await health.handle_dashboard_health(FakeRequest())
+    payload = json.loads(response.text)
+
+    assert payload["appleCalendar"]["available"] is True
+    assert payload["appleCalendar"]["ok"] is None
+
+
+@pytest.mark.asyncio
 async def test_dashboard_health_probes_live_qdrant_connection(temp_home, monkeypatch):
     jarvis_dir = temp_home / ".jarvis"
     jarvis_dir.mkdir(parents=True, exist_ok=True)

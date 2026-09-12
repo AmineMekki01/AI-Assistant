@@ -37,6 +37,30 @@ class ClosedConnection(Exception):
     pass
 
 
+@pytest.mark.asyncio
+async def test_reconnect_replays_voice_failure_and_native_audio_meter(monkeypatch):
+    bridge = bridge_module.WebSocketBridge()
+    events = []
+    monkeypatch.setattr(bridge, "_broadcast_event", events.append)
+    bridge.send_status("error", "Microphone unavailable")
+    bridge.send_voice_debug({"status": "waiting_for_wake_word"})
+    websocket = FakeWebSocket()
+    await bridge._handle_client(websocket)
+    snapshot = [json.loads(message) for message in websocket.sent]
+    assert snapshot[0]["message"] == "Microphone unavailable"
+    assert any(message.get("status") == "waiting_for_wake_word" for message in snapshot)
+
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: 10.0)
+    bridge.send_audio_level(4.0)
+    assert events[-1] == {"type": "audio_level", "level": 1.0}
+    count = len(events)
+    bridge.send_audio_level(0.5)
+    assert len(events) == count
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: 10.2)
+    bridge.send_audio_level(-0.1)
+    assert events[-1] == {"type": "audio_level", "level": 0.0}
+
+
 bridge_module.websockets.exceptions = SimpleNamespace(ConnectionClosed=ClosedConnection)
 
 

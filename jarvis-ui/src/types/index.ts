@@ -30,6 +30,11 @@ export interface BackendSpeakingMessage {
   isSpeaking: boolean
 }
 
+export interface BackendAudioLevelMessage {
+  type: 'audio_level'
+  level: number
+}
+
 export interface BackendVoiceDebugMessage {
   type: 'voice_debug'
   armed: boolean
@@ -91,6 +96,7 @@ export interface MailDraft {
 }
 
 export type BackendMessage =
+  | BackendAudioLevelMessage
   | BackendStatusMessage
   | BackendConversationMessage
   | BackendRecordingMessage

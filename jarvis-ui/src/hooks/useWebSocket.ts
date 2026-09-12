@@ -7,6 +7,7 @@ interface WebSocketState {
   messages: Message[]
   isRecording: boolean
   isSpeaking: boolean
+  nativeAudioLevel: number
   voiceDebug: VoiceDebugState | null
   pendingMailDraft: BackendMailDraftMessage | null
 }
@@ -30,6 +31,8 @@ function isBackendMessage(data: unknown): data is BackendMessage {
       return typeof payload.isRecording === 'boolean'
     case 'speaking':
       return typeof payload.isSpeaking === 'boolean'
+    case 'audio_level':
+      return typeof payload.level === 'number' && Number.isFinite(payload.level)
     case 'voice_debug':
       return typeof payload.armed === 'boolean'
         && typeof payload.speaking === 'boolean'
@@ -87,6 +90,7 @@ export function useWebSocket(url: string) {
     messages: [],
     isRecording: false,
     isSpeaking: false,
+    nativeAudioLevel: 0,
     voiceDebug: null,
     pendingMailDraft: null
   })
@@ -137,6 +141,7 @@ export function useWebSocket(url: string) {
         connectionState: 'disconnected',
         isRecording: false,
         isSpeaking: false,
+        nativeAudioLevel: 0,
         voiceDebug: null,
         statusMessage: 'Connection lost - Retrying...'
       }))
@@ -184,6 +189,9 @@ export function useWebSocket(url: string) {
       }
 
       switch (incoming.type) {
+        case 'audio_level':
+          setState(prev => ({ ...prev, nativeAudioLevel: Math.min(1, Math.max(0, incoming.level)) }))
+          break
         case 'message':
           setState(prev => {
             if (incoming.id) {
@@ -246,18 +254,6 @@ export function useWebSocket(url: string) {
           break
 
         case 'voice_debug':
-          console.log(
-            '🫀 Voice debug:',
-            incoming.status,
-            `armed=${incoming.armed}`,
-            `speaking=${incoming.speaking}`,
-            `music=${incoming.musicPlaying}`,
-            `passive=${incoming.passiveFollowup}`,
-            `skip=${incoming.skipReason || 'none'}`,
-            `cooldown=${incoming.cooldownRemaining.toFixed(1)}s`,
-            `mic=${incoming.micResumeRemaining.toFixed(1)}s`,
-            `window=${incoming.listenWindowRemaining.toFixed(1)}s`
-          )
           setState(prev => ({
             ...prev,
             voiceDebug: incoming

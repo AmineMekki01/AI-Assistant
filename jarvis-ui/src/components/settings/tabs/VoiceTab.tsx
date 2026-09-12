@@ -265,7 +265,7 @@ export function VoiceTab() {
   return (
     <div className="tab-content">
       <section className="settings-section">
-        <h3>🎙️ Voice Settings</h3>
+        <h3>Voice Settings</h3>
 
         <label className="checkbox toggle">
           <input
@@ -356,7 +356,7 @@ export function VoiceTab() {
 
       <section className="settings-section">
         <div className="section-header">
-          <h3>🧬 Speaker Verification</h3>
+          <h3>Speaker Verification</h3>
           <span className={`status-badge ${speakerProfile?.profileExists ? 'success' : 'idle'}`}>
             {speakerProfile?.profileExists ? 'Profile enrolled' : 'No profile yet'}
           </span>

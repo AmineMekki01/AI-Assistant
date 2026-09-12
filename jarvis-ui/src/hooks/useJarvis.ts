@@ -136,6 +136,7 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
     messages,
     isRecording: wsIsRecording,
     isSpeaking,
+    nativeAudioLevel,
     voiceDebug,
     setRecording,
     sendAudioChunk,
@@ -332,9 +333,13 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
 
   useEffect(() => {
     const wakeStatus = statusMessage.toLowerCase()
-    const listening = wakeStatus.includes('wake word armed') || wakeStatus.includes('wake word detected') || wakeStatus.includes('listening for your request')
+    const listening = voiceDebug?.status === 'waiting_for_wake_word'
+      || voiceDebug?.status === 'listening'
+      || wakeStatus.includes('wake word armed')
+      || wakeStatus.includes('wake word detected')
+      || wakeStatus.includes('listening for your request')
     setIsWakeListening(listening)
-  }, [statusMessage])
+  }, [statusMessage, voiceDebug?.status])
 
   const state: JarvisState = useMemo(() => ({
     connectionState,
@@ -342,14 +347,14 @@ export function useJarvis(): { state: JarvisState; actions: JarvisActions } {
     messages,
     isRecording: uiRecording,
     isSpeaking,
-    audioLevel,
+    audioLevel: browserRecording ? audioLevel : nativeAudioLevel,
     currentTime,
     systemMetrics,
     pendingMailDraft,
     isWakeListening,
     wakeWord: voiceSettings.wakeWord,
     voiceDebug
-  }), [audioError, connectionState, statusMessage, messages, uiRecording, isSpeaking, audioLevel, currentTime, systemMetrics, pendingMailDraft, isWakeListening, voiceSettings.wakeWord, voiceDebug])
+  }), [audioError, connectionState, statusMessage, messages, uiRecording, isSpeaking, audioLevel, browserRecording, nativeAudioLevel, currentTime, systemMetrics, pendingMailDraft, isWakeListening, voiceSettings.wakeWord, voiceDebug])
 
   const actions: JarvisActions = useMemo(() => ({
     toggleRecording: handleToggleRecording,

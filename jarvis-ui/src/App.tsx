@@ -3,7 +3,6 @@ import { AnimatePresence, motion } from 'framer-motion'
 import './App.css'
 
 import { useJarvis } from './hooks/useJarvis'
-import { AudioWaveform } from './components/ui/AudioWaveform'
 import { SettingsModal } from './components/settings/SettingsModal'
 import { JarvisHUD } from './components/hud/JarvisHUD'
 import { Header, MessagesPanel, StatusPanel, Footer } from './components/layout'
@@ -14,8 +13,8 @@ function App() {
 
   const { connectionState, statusMessage, messages, isRecording, isSpeaking, audioLevel, currentTime, systemMetrics, pendingMailDraft, isWakeListening, wakeWord, voiceDebug } = state
   const briefingStatusMessage = statusMessage.startsWith('Hang on') ? statusMessage : ''
-
-  const latestMessage = messages[messages.length - 1]
+  const voiceNotice = /unavailable|disabled|rejected|interrupted|enroll|denied|error|failed|crashed|expired|behind|stopped|reopening/i.test(statusMessage) ? statusMessage : ''
+  const nativeListening = connectionState === 'connected' && (isWakeListening || Boolean(voiceDebug?.passiveFollowup))
 
   const timeString = useMemo(() =>
     currentTime.toLocaleTimeString('en-US', {
@@ -26,78 +25,41 @@ function App() {
     [currentTime]
   )
 
-  const seconds = useMemo(() =>
-    currentTime.getSeconds().toString().padStart(2, '0'),
-    [currentTime]
-  )
-
   return (
     <div className="jarvis-app">
-      <div className="bg-grid" />
-      <div className="bg-scanlines" />
-
       <Header
         status={connectionState}
         isRecording={isRecording}
         isSpeaking={isSpeaking}
+        onOpenSettings={() => setShowSettings(true)}
       />
 
       <main className="jarvis-main">
+        <section className="assistant-stage" aria-label="Your assistant">
+          <div className="stage-topline">
+            <span className="eyebrow">Personal intelligence</span>
+            <span className="stage-date">{currentTime.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+          </div>
+          <div className="core-container">
+            <div className="stage-intro">
+              <p className="eyebrow">Just a rather very intelligent system</p>
+              <h1>J.A.R.V.I.S.</h1>
+              <p className="stage-description">At your service.</p>
+            </div>
+            <JarvisHUD isSpeaking={isSpeaking} isRecording={isRecording} isListening={nativeListening} audioLevel={audioLevel} />
+            <div className="stage-caption" role="status">
+              <span className={`presence-dot ${connectionState === 'connected' ? 'online' : ''}`} />
+              {connectionState !== 'connected' ? 'Waiting for connection' : isSpeaking ? 'Speaking' : isRecording ? 'Listening' : voiceDebug?.passiveFollowup ? 'Ready for your next request' : isWakeListening ? 'Ready when you are' : 'Voice standby'}
+            </div>
+            {briefingStatusMessage && <p className="hud-status-message">{briefingStatusMessage}</p>}
+            {voiceNotice && <p className="voice-notice" role="alert">{voiceNotice}</p>}
+          </div>
+          <div className="stage-bottomline">
+            <div><span className="eyebrow">Local time</span><span className="time-display">{timeString}</span></div>
+            <p>Voice connected to action.<br /><span>Speak naturally. I’ll take it from here.</span></p>
+          </div>
+        </section>
         <MessagesPanel messages={messages} />
-
-        <motion.div
-          className="core-container"
-          initial={{ scale: 0.8, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          transition={{ duration: 1, delay: 0.3 }}
-        >
-          <div className="hud-title">
-            <motion.h1
-              className="hud-title-main"
-              animate={{
-                textShadow: isSpeaking
-                  ? ['0 0 20px rgba(0, 240, 255, 0.8)', '0 0 40px rgba(0, 240, 255, 1)', '0 0 20px rgba(0, 240, 255, 0.8)']
-                  : '0 0 15px rgba(0, 240, 255, 0.5)'
-              }}
-              transition={{ duration: 1.5, repeat: Infinity }}
-            >
-              J.A.R.V.I.S 08
-            </motion.h1>
-            <div className="hud-title-sub">ARTIFICIAL INTELLIGENCE</div>
-          </div>
-
-          <JarvisHUD
-            isSpeaking={isSpeaking}
-            isRecording={isRecording}
-            audioLevel={audioLevel}
-          />
-
-          {briefingStatusMessage && (
-            <motion.div
-              className="hud-status-message"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.35 }}
-            >
-              {briefingStatusMessage}
-            </motion.div>
-          )}
-
-          <div className="time-display">
-            <motion.span
-              className="time-main"
-              animate={{
-                color: isSpeaking ? '#00f0ff' : '#ffffff'
-              }}
-            >
-              {timeString}
-            </motion.span>
-            <span className="time-seconds">:{seconds}</span>
-          </div>
-
-          <AudioWaveform isActive={isRecording || isSpeaking} audioLevel={audioLevel} />
-        </motion.div>
-
         <StatusPanel
           isRecording={isRecording}
           isSpeaking={isSpeaking}
@@ -107,13 +69,13 @@ function App() {
       </main>
 
       <Footer
+        connectionState={connectionState}
         isSpeaking={isSpeaking}
         isRecording={isRecording}
         isWakeListening={isWakeListening}
+        followup={Boolean(voiceDebug?.passiveFollowup)}
         wakeWord={wakeWord}
-        latestMessage={latestMessage}
-        onToggleRecording={actions.toggleRecording}
-        onOpenSettings={() => setShowSettings(true)}
+        statusMessage={statusMessage}
       />
 
       <AnimatePresence>

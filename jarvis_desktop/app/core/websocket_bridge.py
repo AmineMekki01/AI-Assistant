@@ -6,6 +6,7 @@ import base64
 import asyncio
 import json
 import threading
+import time
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -52,6 +53,9 @@ class WebSocketBridge:
         self.is_recording = False
         self.is_speaking = False
         self._assistant_message_id = None
+        self._latest_status = {"type": "status", "state": "connected", "message": "J.A.R.V.I.S. SYSTEM ONLINE"}
+        self._latest_voice_debug = None
+        self._last_audio_level_at = 0.0
         
     def start(self):
         """Start WebSocket server in background thread."""
@@ -194,18 +198,16 @@ class WebSocketBridge:
         client_id = id(websocket)
         print(f"🟢 Frontend connected [{client_id}]")
         
-        await self._send_to_client(websocket, {
-            "type": "status",
-            "state": "connected",
-            "message": "J.A.R.V.I.S. SYSTEM ONLINE"
-        })
+        await self._send_to_client(websocket, self._latest_status)
         await self._send_to_client(websocket, {"type": "recording", "isRecording": self.is_recording})
         await self._send_to_client(websocket, {"type": "speaking", "isSpeaking": self.is_speaking})
+        if self._latest_voice_debug is not None:
+            await self._send_to_client(websocket, self._latest_voice_debug)
         
         await self._send_to_client(websocket, {
             "type": "message",
             "role": "assistant",
-            "text": "Say Hey Jarvis once, then keep talking after each reply. You can also click the microphone to start and stop a recording."
+            "text": "Say Hey Jarvis once, then keep talking after each reply. No buttons needed."
         })
         
         try:
@@ -317,10 +319,22 @@ class WebSocketBridge:
         
     def send_status(self, state: str, message: str):
         """Send status update to all frontend clients."""
-        self._broadcast_event({
+        self._latest_status = {
             "type": "status",
             "state": state,
             "message": message,
+        }
+        self._broadcast_event(self._latest_status)
+
+    def send_audio_level(self, level: float) -> None:
+        """Publish a bounded native input meter without sending microphone audio."""
+        now = time.monotonic()
+        if now - self._last_audio_level_at < 0.07:
+            return
+        self._last_audio_level_at = now
+        self._broadcast_event({
+            "type": "audio_level",
+            "level": min(1.0, max(0.0, float(level))),
         })
 
     def send_voice_debug(self, data: dict[str, Any]) -> None:
@@ -338,6 +352,7 @@ class WebSocketBridge:
             "listenWindowRemaining": float(data.get("listenWindowRemaining", 0.0)),
             "status": str(data.get("status", "idle")),
         }
+        self._latest_voice_debug = payload
         self._broadcast_event(payload)
 
     def send_mail_draft(self, draft: dict[str, Any]):

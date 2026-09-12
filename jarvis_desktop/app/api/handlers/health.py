@@ -1,6 +1,7 @@
 """Health check endpoint."""
 import json
 import asyncio
+import sys
 from pathlib import Path
 
 from aiohttp import web
@@ -64,6 +65,10 @@ async def handle_dashboard_health(request):
         jarvis_dir / "apple_calendar_status.json",
         {"enabled": False, "available": False, "ok": None},
     )
+    # Availability is a platform capability, not the result of a previous
+    # permission probe.  A fresh macOS install has no cache file yet, but the
+    # integration must still be activatable so the user can run the probe.
+    apple_status["available"] = sys.platform == "darwin"
 
     music_health = {"available": False, "librarySize": 0, "cacheFresh": False}
     try:

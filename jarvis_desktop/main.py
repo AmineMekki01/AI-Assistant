@@ -853,6 +853,12 @@ class JarvisWebSocketApp:
                 last_capture_at = time.monotonic()
                 if time.monotonic() - captured_at > 0.3:
                     continue
+                # The hands-free microphone belongs to the backend. Publish its
+                # signal level so the frontend does not need a second mic stream.
+                captured_samples = np.frombuffer(raw_audio, dtype=np.int16)
+                if self.bridge and captured_samples.size:
+                    input_level = float(np.mean(np.abs(captured_samples.astype(np.float32))) / 32768.0)
+                    self.bridge.send_audio_level(input_level * 12.0)
                 music_playing = self._native_music_playing
                 shared_music_override_active = music_state.voice_followup_override_active()
                 in_listening_window = time.time() < self._native_listening_window_until

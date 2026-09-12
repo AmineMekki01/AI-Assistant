@@ -1,456 +1,109 @@
-import { useEffect, useRef } from 'react'
+import { useId } from 'react'
+import { useReducedMotion } from 'framer-motion'
 
 interface JarvisHUDProps {
   isSpeaking: boolean
   isRecording: boolean
+  isListening: boolean
   audioLevel: number
 }
 
-function FlowingWave({
-  color,
-  baseRadius,
-  speed,
-  amplitude,
-  frequency,
-  phase,
-  isActive,
-  audioLevel,
-  glow,
-}: {
-  color: string
-  baseRadius: number
-  speed: number
-  amplitude: number
-  frequency: number
-  phase: number
-  isActive: boolean
-  audioLevel: number
-  glow: number
-}) {
-  const pathRef = useRef<SVGPathElement>(null)
-  const animRef = useRef<number>()
-
-  useEffect(() => {
-    const animate = () => {
-      if (pathRef.current) {
-        const numPoints = 160
-        const pts: string[] = []
-        const t = performance.now() * 0.001
-
-        const speakBoost = isActive ? 2.2 + audioLevel * 3.5 : 0.5
-        const chaosBoost = isActive ? audioLevel * 25 : 0
-
-        for (let i = 0; i <= numPoints; i++) {
-          const angle = (i / numPoints) * Math.PI * 2
-          const wave1 = Math.sin(angle * frequency + t * speed + phase) * amplitude
-          const wave2 = Math.sin(angle * frequency * 2.3 - t * speed * 0.7) * (amplitude * 0.6)
-          const wave3 = Math.cos(angle * frequency * 0.5 + t * speed * 1.3) * (amplitude * 0.4)
-          const jitter = isActive
-            ? Math.sin(angle * 17 + t * 8) * chaosBoost * 0.4 +
-              Math.cos(angle * 23 - t * 11) * chaosBoost * 0.3
-            : 0
-          const noise = (wave1 + wave2 + wave3) * speakBoost + jitter
-
-          const r = baseRadius + noise
-          const x = Math.cos(angle) * r
-          const y = Math.sin(angle) * r
-          pts.push(`${i === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`)
-        }
-
-        pathRef.current.setAttribute('d', pts.join(' ') + ' Z')
-      }
-      animRef.current = requestAnimationFrame(animate)
-    }
-    animRef.current = requestAnimationFrame(animate)
-    return () => {
-      if (animRef.current) cancelAnimationFrame(animRef.current)
-    }
-  }, [baseRadius, speed, amplitude, frequency, phase, isActive, audioLevel])
+export function JarvisHUD({ isSpeaking, isRecording, isListening, audioLevel }: JarvisHUDProps) {
+  const reducedMotion = useReducedMotion()
+  const id = useId().replace(/:/g, '')
+  const glowId = `reactor-glow-${id}`
+  const ringId = `reactor-ring-${id}`
+  const active = isSpeaking || isRecording || isListening
+  const inputLevel = Number.isFinite(audioLevel) ? Math.min(1, Math.max(0, audioLevel)) : 0
+  // Speaking uses a visual pulse, independent of nearby microphone sounds.
+  const level = isSpeaking ? 0.45 : active ? Math.sqrt(inputLevel) : 0
+  const reacting = isSpeaking || isRecording || (isListening && inputLevel > 0.035)
+  const expansion = 1.035 + level * 0.075
 
   return (
-    <path
-      ref={pathRef}
-      fill={color}
-      fillOpacity={isActive ? 0.25 : 0.1}
-      stroke={color}
-      strokeWidth="1.2"
-      strokeOpacity={isActive ? 0.9 : 0.4}
-      style={{ filter: `drop-shadow(0 0 ${glow}px ${color})` }}
-    />
-  )
-}
+    <div className={`reactor ${isSpeaking ? 'speaking' : isRecording || isListening ? 'listening' : ''} ${reacting ? 'reacting' : ''}`} aria-hidden="true">
+      <div className="reactor-aura" />
+      <svg viewBox="-250 -250 500 500" className="reactor-svg">
+        <defs>
+          <radialGradient id={glowId}>
+            <stop stopColor="var(--reactor-bright)" stopOpacity=".3" />
+            <stop offset="1" stopColor="var(--reactor-color)" stopOpacity="0" />
+          </radialGradient>
+          <linearGradient id={ringId} x1="0" y1="0" x2="1" y2="1">
+            <stop stopColor="var(--reactor-bright)" />
+            <stop offset=".5" stopColor="var(--reactor-deep)" />
+            <stop offset="1" stopColor="var(--reactor-color)" />
+          </linearGradient>
+        </defs>
 
-function RadialSpectrum({
-  isActive,
-  audioLevel,
-  color,
-}: {
-  isActive: boolean
-  audioLevel: number
-  color: string
-}) {
-  const groupRef = useRef<SVGGElement>(null)
-  const animRef = useRef<number>()
+        <circle r="236" className="reactor-guide" />
+        <circle r="226" className="reactor-guide" strokeDasharray="1 8" />
+        <path d="M-213 -100 H-227 Q-243 -100 -243 -80 V80 Q-243 100 -227 100 H-213 M213 -100 H227 Q243 -100 243 -80 V80 Q243 100 227 100 H213" fill="none" stroke="currentColor" strokeWidth=".8" opacity=".4" />
 
-  useEffect(() => {
-    const animate = () => {
-      if (groupRef.current) {
-        const lines = groupRef.current.children
-        const t = performance.now() * 0.003
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i] as SVGLineElement
-          const base = 6
-          const variance = isActive
-            ? Math.abs(Math.sin(t * 2 + i * 0.3)) * 32 +
-              Math.abs(Math.sin(t * 5 + i * 0.7)) * 18 +
-              audioLevel * 55
-            : Math.abs(Math.sin(t * 0.3 + i * 0.1)) * 3
-          const h = base + variance
-          const angle = (i / lines.length) * Math.PI * 2
-          const x1 = Math.cos(angle) * 78
-          const y1 = Math.sin(angle) * 78
-          const x2 = Math.cos(angle) * (78 + h)
-          const y2 = Math.sin(angle) * (78 + h)
-          line.setAttribute('x1', x1.toFixed(2))
-          line.setAttribute('y1', y1.toFixed(2))
-          line.setAttribute('x2', x2.toFixed(2))
-          line.setAttribute('y2', y2.toFixed(2))
-        }
-      }
-      animRef.current = requestAnimationFrame(animate)
-    }
-    animRef.current = requestAnimationFrame(animate)
-    return () => {
-      if (animRef.current) cancelAnimationFrame(animRef.current)
-    }
-  }, [isActive, audioLevel])
-
-  return (
-    <g ref={groupRef}>
-      {[...Array(96)].map((_, i) => (
-        <line
-          key={i}
-          stroke={color}
-          strokeWidth="1.2"
-          strokeOpacity={isActive ? 0.9 : 0.3}
-          strokeLinecap="round"
-        />
-      ))}
-    </g>
-  )
-}
-
-function PulseRings({ isActive, color }: { isActive: boolean; color: string }) {
-  if (!isActive) return null
-  return (
-    <g>
-      {[0, 1, 2].map((i) => (
-        <circle
-          key={i}
-          cx="0"
-          cy="0"
-          r="30"
-          fill="none"
-          stroke={color}
-          strokeWidth="1.5"
-          style={{
-            animation: `pulse-ring 2s ease-out infinite`,
-            animationDelay: `${i * 0.66}s`,
-            transformOrigin: 'center',
-          }}
-        />
-      ))}
-    </g>
-  )
-}
-
-function ScanBeam({ isActive, color }: { isActive: boolean; color: string }) {
-  if (!isActive) return null
-  return (
-    <g style={{ animation: 'scan-sweep 3s linear infinite', transformOrigin: 'center' }}>
-      <defs>
-        <linearGradient id="scanGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" stopColor={color} stopOpacity="0" />
-          <stop offset="50%" stopColor={color} stopOpacity="0.15" />
-          <stop offset="100%" stopColor={color} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <path d="M 0 0 L -220 -40 A 220 220 0 0 1 -220 40 Z" fill="url(#scanGradient)" />
-    </g>
-  )
-}
-
-function EnergyBursts({ isActive, audioLevel, color }: { isActive: boolean; audioLevel: number; color: string }) {
-  const groupRef = useRef<SVGGElement>(null)
-  const animRef = useRef<number>()
-
-  useEffect(() => {
-    if (!isActive) return
-    const animate = () => {
-      if (groupRef.current) {
-        const lines = groupRef.current.children
-        const t = performance.now() * 0.001
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i] as SVGLineElement
-          const angle = (i / lines.length) * Math.PI * 2 + t * 0.3
-          const burst = Math.max(0, Math.sin(t * 3 + i * 1.3)) * (25 + audioLevel * 40)
-          const innerR = 195
-          const outerR = innerR + burst
-          line.setAttribute('x1', (Math.cos(angle) * innerR).toFixed(2))
-          line.setAttribute('y1', (Math.sin(angle) * innerR).toFixed(2))
-          line.setAttribute('x2', (Math.cos(angle) * outerR).toFixed(2))
-          line.setAttribute('y2', (Math.sin(angle) * outerR).toFixed(2))
-          line.setAttribute('opacity', String(Math.max(0.2, burst / 50)))
-        }
-      }
-      animRef.current = requestAnimationFrame(animate)
-    }
-    animRef.current = requestAnimationFrame(animate)
-    return () => {
-      if (animRef.current) cancelAnimationFrame(animRef.current)
-    }
-  }, [isActive, audioLevel])
-
-  if (!isActive) return null
-  return (
-    <g ref={groupRef}>
-      {[...Array(24)].map((_, i) => (
-        <line key={i} stroke={color} strokeWidth="2" strokeLinecap="round" />
-      ))}
-    </g>
-  )
-}
-
-export function JarvisHUD({ isSpeaking, isRecording, audioLevel }: JarvisHUDProps) {
-  const primary = isRecording ? '#ef4444' : '#00f0ff'
-  const secondary = '#ff2d92'
-  const isActive = isSpeaking || isRecording
-
-  return (
-    <div className="jarvis-hud-wrapper">
-      <div className="hud-bracket tl" />
-      <div className="hud-bracket tr" />
-      <div className="hud-bracket bl" />
-      <div className="hud-bracket br" />
-
-      <div className="hud-side-marker left">
-        <div className="marker-line" />
-        <div className="marker-square" />
-        <div className="marker-line short" />
-      </div>
-      <div className="hud-side-marker right">
-        <div className="marker-line short" />
-        <div className="marker-square" />
-        <div className="marker-line" />
-      </div>
-
-      <div className={`hud-main ${isSpeaking ? 'speaking' : ''} ${isRecording ? 'recording' : ''}`}>
-        <svg viewBox="-250 -250 500 500" className="hud-svg">
-          <defs>
-            <radialGradient id="coreGlow">
-              <stop offset="0%" stopColor={primary} stopOpacity="0.8" />
-              <stop offset="60%" stopColor={primary} stopOpacity="0.2" />
-              <stop offset="100%" stopColor={primary} stopOpacity="0" />
-            </radialGradient>
-            <radialGradient id="centerDotGlow">
-              <stop offset="0%" stopColor="#ffffff" stopOpacity="1" />
-              <stop offset="50%" stopColor={primary} stopOpacity="0.8" />
-              <stop offset="100%" stopColor={primary} stopOpacity="0" />
-            </radialGradient>
-          </defs>
-
-          <circle
-            cx="0"
-            cy="0"
-            r="240"
-            fill="none"
-            stroke={primary}
-            strokeWidth="0.5"
-            strokeDasharray="1 3"
-            opacity="0.3"
-          />
-
-          <g className="hud-rotate-slow">
-            <circle
-              cx="0"
-              cy="0"
-              r="222"
-              fill="none"
-              stroke={primary}
-              strokeWidth="1"
-              strokeDasharray="180 40 120 40 80 40"
-              opacity="0.7"
-            />
+        {/* SVG scale uses the rings' exact (0, 0) center. CSS transform origins
+            on a negative viewBox can move that pivot and cause diagonal drift. */}
+        <g className="reactor-pulse">
+          {reacting && !reducedMotion && (
+            <animateTransform attributeName="transform" type="scale"
+              values={`1;${expansion};1`} keyTimes="0;0.5;1"
+              calcMode="spline" keySplines=".4 0 .2 1;.4 0 .2 1"
+              dur="0.95s" repeatCount="indefinite" />
+          )}
+          <circle r="208" fill="none" stroke={`url(#${ringId})`} strokeWidth="1.8" className="reactor-rim" />
+          <g>
+            {!reducedMotion && <animateTransform attributeName="transform" type="rotate" from="0 0 0" to="360 0 0" dur="80s" repeatCount="indefinite" />}
+            {Array.from({ length: 48 }, (_, i) => (
+              <line key={i} x1="0" y1="-181" x2="0" y2="-198"
+                transform={`rotate(${i * 7.5})`} stroke="currentColor"
+                strokeWidth="6" opacity={0.12 + (1 + Math.sin(i * Math.PI / 24)) * 0.27} />
+            ))}
           </g>
-
-          <g className="hud-rotate-reverse-slow">
-            {[...Array(72)].map((_, i) => {
-              const angle = (i / 72) * 360
-              const isMajor = i % 6 === 0
-              const isMid = i % 3 === 0
-              return (
-                <line
-                  key={i}
-                  x1="0"
-                  y1={-210}
-                  x2="0"
-                  y2={isMajor ? -195 : isMid ? -202 : -206}
-                  stroke={primary}
-                  strokeWidth={isMajor ? 1.5 : 1}
-                  opacity={isMajor ? 0.9 : isMid ? 0.6 : 0.3}
-                  transform={`rotate(${angle})`}
-                />
-              )
-            })}
+          <circle r="172" fill="none" stroke="currentColor" strokeWidth="2.5" className="reactor-rim" opacity=".85" />
+          <g>
+            {!reducedMotion && <animateTransform attributeName="transform" type="rotate" from="360 0 0" to="0 0 0" dur="100s" repeatCount="indefinite" />}
+            {Array.from({ length: 96 }, (_, i) => (
+              <line key={i} x1="0" y1="-156" x2="0" y2={i % 8 === 0 ? -146 : -150}
+                transform={`rotate(${i * 3.75})`} stroke="currentColor"
+                strokeWidth="1.3" opacity={i % 8 === 0 ? .9 : .5} />
+            ))}
+            <circle r="138" fill="none" stroke="currentColor" strokeWidth=".8" strokeDasharray="180 65 60 65" opacity=".6" />
           </g>
-
-          <g className="hud-rotate-medium">
-            <circle
-              cx="0"
-              cy="0"
-              r="170"
-              fill="none"
-              stroke={primary}
-              strokeWidth="0.8"
-              strokeDasharray="2 6"
-              opacity="0.5"
-            />
+          <circle r="145" fill={`url(#${glowId})`} />
+          <g className="reactor-spectrum">
+            {Array.from({ length: 48 }, (_, i) => (
+              <line key={i} x1="0" y1="-116"
+                x2="0" y2={-120 - level * (4 + (1 + Math.sin(i * 1.7)) * 4)}
+                transform={`rotate(${i * 7.5})`} stroke="currentColor"
+                strokeWidth="2" strokeLinecap="round" opacity={active ? .7 : .25} />
+            ))}
           </g>
-
-          <circle
-            cx="0"
-            cy="0"
-            r="155"
-            fill="none"
-            stroke={primary}
-            strokeWidth="1"
-            strokeDasharray="100 30 60 30 80 40"
-            opacity="0.8"
-          />
-
-          <RadialSpectrum isActive={isActive} audioLevel={audioLevel} color={primary} />
-
-          <EnergyBursts isActive={isSpeaking} audioLevel={audioLevel} color={primary} />
-
-          <ScanBeam isActive={isSpeaking} color={primary} />
-
-          <PulseRings isActive={isSpeaking} color={primary} />
-
-          <FlowingWave
-            color={primary}
-            baseRadius={100}
-            speed={1.2}
-            amplitude={15}
-            frequency={5}
-            phase={0}
-            isActive={isActive}
-            audioLevel={audioLevel}
-            glow={isActive ? 12 : 4}
-          />
-
-          <FlowingWave
-            color={secondary}
-            baseRadius={95}
-            speed={-1.5}
-            amplitude={18}
-            frequency={4}
-            phase={Math.PI / 2}
-            isActive={isActive}
-            audioLevel={audioLevel}
-            glow={isActive ? 14 : 5}
-          />
-
-          <g className="hud-rotate-fast">
-            <circle
-              cx="0"
-              cy="0"
-              r="72"
-              fill="none"
-              stroke={primary}
-              strokeWidth="0.8"
-              strokeDasharray="3 2"
-              opacity="0.7"
-            />
+          <g className="reactor-core">
+            <circle r="106" fill="none" stroke="currentColor" strokeWidth=".7" opacity=".4" />
+            <circle r="99" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="130 30" opacity=".8" />
+            <circle r="90" fill="var(--reactor-deep)" fillOpacity=".12" stroke="currentColor" strokeOpacity=".3" />
+            <circle r="67" fill="none" stroke="currentColor" strokeWidth="1" opacity=".7" />
+            <circle r="62" fill="none" stroke="currentColor" strokeWidth="4" strokeDasharray="72 58" opacity=".7" />
+            <circle r="49" fill="none" stroke="currentColor" strokeWidth=".7" opacity=".4" />
+            {[0, 120, 240].map(angle => (
+              <path key={angle} d="M-8 -75 H8 L5 -65 H-5 Z" transform={`rotate(${angle})`} fill="currentColor" opacity=".75" />
+            ))}
+            <circle r="29" fill={`url(#${glowId})`} stroke="currentColor" strokeWidth="1.2" />
+            <circle r="9" fill="var(--reactor-bright)" className="reactor-center" />
           </g>
-
-          <g className="hud-rotate-reverse-fast">
-            {[...Array(56)].map((_, i) => {
-              const angle = (i / 56) * Math.PI * 2
-              return (
-                <circle
-                  key={i}
-                  cx={Math.cos(angle) * 60}
-                  cy={Math.sin(angle) * 60}
-                  r="1.2"
-                  fill={primary}
-                  opacity={i % 4 === 0 ? 1 : 0.5}
-                />
-              )
-            })}
+        </g>
+        {[0, 90, 180, 270].map(angle => (
+          <g key={angle} transform={`rotate(${angle})`}>
+            <path d="M-5 -244 H5 M0 -249 V-239" stroke="currentColor" opacity=".6" />
           </g>
-
-          <circle cx="0" cy="0" r="40" fill="url(#coreGlow)" />
-
-          <circle
-            cx="0"
-            cy="0"
-            r="22"
-            fill="none"
-            stroke={primary}
-            strokeWidth="2"
-            opacity="0.9"
-          />
-
-          {[...Array(8)].map((_, i) => {
-            const angle = (i / 8) * 360
-            return (
-              <line
-                key={i}
-                x1="0"
-                y1={-12}
-                x2="0"
-                y2={-20}
-                stroke={primary}
-                strokeWidth="1.5"
-                opacity="0.9"
-                transform={`rotate(${angle})`}
-              />
-            )
-          })}
-
-          <circle cx="0" cy="0" r="10" fill="url(#centerDotGlow)" />
-          <circle cx="0" cy="0" r="4" fill="#ffffff" />
-
-          {[0, 90, 180, 270].map((angle) => (
-            <g key={angle} transform={`rotate(${angle})`}>
-              <rect
-                x="-3"
-                y="-230"
-                width="6"
-                height="6"
-                fill="none"
-                stroke={primary}
-                strokeWidth="1"
-                opacity="0.8"
-              />
-            </g>
-          ))}
-        </svg>
-
-        <div className="orbit-container">
-          {[...Array(4)].map((_, i) => (
-            <div
-              key={i}
-              className="orbit"
-              style={{
-                animationDuration: `${12 + i * 4}s`,
-                animationDirection: i % 2 === 0 ? 'normal' : 'reverse',
-              }}
-            >
-              <div className="orbit-particle" style={{ background: i % 2 === 0 ? primary : secondary }} />
-            </div>
-          ))}
-        </div>
+        ))}
+      </svg>
+      <div className="reactor-signal">
+        {Array.from({ length: 25 }, (_, i) => (
+          <span key={i} style={{
+            height: active ? 5 + (1 + Math.sin(i * 1.9)) * (isSpeaking ? 12 : 3) + level * (15 + (1 + Math.cos(i)) * 12) : 3,
+            animationDelay: `${i * .08}s`,
+          }} />
+        ))}
       </div>
     </div>
   )

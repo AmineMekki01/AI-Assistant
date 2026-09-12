@@ -80,6 +80,24 @@ test('streamed caption keeps its identity when a late user transcript arrives', 
   h.cleanup()
 })
 
+test('native microphone levels update without browser capture and reset on disconnect', async () => {
+  Socket.instances = []
+  const h = hookHarness('src/hooks/useWebSocket.ts', 'useWebSocket', { WebSocket: Socket }, ['ws://test'])
+  h.render()
+  const socket = Socket.instances[0]
+  socket.open()
+  await socket.onmessage({ data: JSON.stringify({ type: 'audio_level', level: 0.6 }) })
+  assert.equal(h.render().nativeAudioLevel, 0.6)
+  assert.equal(socket.sent.length, 0)
+  await socket.onmessage({ data: JSON.stringify({ type: 'audio_level', level: 8 }) })
+  assert.equal(h.render().nativeAudioLevel, 1)
+  await socket.onmessage({ data: JSON.stringify({ type: 'audio_level', level: 'bad' }) })
+  assert.equal(h.render().nativeAudioLevel, 1)
+  socket.close(); socket.onclose()
+  assert.equal(h.render().nativeAudioLevel, 0)
+  h.cleanup()
+})
+
 test('disconnected microphone audio and commands are never replayed', () => {
   Socket.instances = []
   const h = hookHarness('src/hooks/useWebSocket.ts', 'useWebSocket', { WebSocket: Socket }, ['ws://test'])

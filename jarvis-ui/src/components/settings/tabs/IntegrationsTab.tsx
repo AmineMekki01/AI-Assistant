@@ -46,10 +46,7 @@ export function IntegrationsTab() {
   const dashboardTotalCount = 6
 
   const refreshDashboard = useCallback(async () => {
-    const [health, calendars] = await Promise.all([
-      checkDashboardHealth(),
-      listAppleCalendars(),
-    ])
+    const health = await checkDashboardHealth()
 
     if (health) {
       setDashboardHealth(health)
@@ -68,10 +65,7 @@ export function IntegrationsTab() {
       else setAppleCalStatus('idle')
     }
 
-    if (calendars.length > 0) {
-      setAppleCalendars(calendars)
-    }
-  }, [checkDashboardHealth, listAppleCalendars])
+  }, [checkDashboardHealth])
 
   useEffect(() => {
     refreshDashboard()
@@ -149,7 +143,7 @@ export function IntegrationsTab() {
         <div className="dashboard-hero">
           <div>
             <p className="dashboard-eyebrow">Control center</p>
-            <h3>🩺 Connections &amp; Integrations</h3>
+            <h3>Connections &amp; Integrations</h3>
             <p className="section-desc">
               Live backend and integration status at a glance. Use this to see what is connected,
               what is ready, and what still needs attention.
@@ -184,7 +178,7 @@ export function IntegrationsTab() {
 
       <section className="settings-section qdrant-section">
         <div className="section-header">
-          <h3>🗄️ Qdrant Vector Database</h3>
+          <h3>Qdrant Vector Database</h3>
           <span className={`status-badge ${qdrantStatus}`}>
             {qdrantStatus === 'idle' && 'Not Tested'}
             {qdrantStatus === 'testing' && 'Testing...'}
@@ -257,7 +251,7 @@ export function IntegrationsTab() {
 
       <section className="settings-section obsidian-section">
         <div className="section-header">
-          <h3>📝 Obsidian Vault</h3>
+          <h3>Obsidian Vault</h3>
           <span className={`status-badge ${obsidianStatus}`}>
             {obsidianStatus === 'idle' && 'Not Synced'}
             {obsidianStatus === 'syncing' && 'Syncing...'}
@@ -325,7 +319,7 @@ export function IntegrationsTab() {
 
       <section className="settings-section google-section">
         <div className="section-header">
-          <h3>📧 Google Integration</h3>
+          <h3>Google Integration</h3>
           <span className={`status-badge ${googleStatus?.connected ? 'success' : 'idle'}`}>
             {googleStatus?.connected ? 'Connected' : 'Not Connected'}
           </span>
@@ -402,7 +396,7 @@ export function IntegrationsTab() {
 
       <section className="settings-section zimbra-section">
         <div className="section-header">
-          <h3>✉️ Secondary Mailbox (Zimbra / OVH / IMAP)</h3>
+          <h3>Secondary Mailbox (Zimbra / OVH / IMAP)</h3>
           <span className={`status-badge ${zimbraStatus}`}>
             {zimbraStatus === 'idle' && 'Not Configured'}
             {zimbraStatus === 'testing' && 'Testing...'}
@@ -547,7 +541,7 @@ export function IntegrationsTab() {
       {/* Apple Calendar Section */}
       <section className="settings-section apple-calendar-section">
         <div className="section-header">
-          <h3>🗓️ Apple Calendar (macOS)</h3>
+          <h3>Apple Calendar (macOS)</h3>
           <span className={`status-badge ${appleCalStatus}`}>
             {appleCalStatus === 'idle' && (appleCalDetails?.available === false ? 'macOS only' : 'Not Tested')}
             {appleCalStatus === 'testing' && 'Probing...'}

@@ -44,7 +44,7 @@ export function PersonalTab() {
   return (
     <div className="tab-content">
       <section className="settings-section">
-        <h3>👤 Personal Information</h3>
+        <h3>Personal Information</h3>
         <p className="section-desc">Your personal details help JARVIS provide better assistance</p>
 
         <div className="form-grid">
@@ -102,7 +102,7 @@ export function PersonalTab() {
       </section>
 
       <section className="settings-section">
-        <h3>🌐 Preferences</h3>
+        <h3>Preferences</h3>
 
         <div className="form-row">
           <div className="form-group">
@@ -134,7 +134,7 @@ export function PersonalTab() {
       </section>
 
       <section className="settings-section">
-        <h3>📧 Email Templates</h3>
+        <h3>Email Templates</h3>
         <p className="section-desc">Save reusable email drafts with {'{'}placeholder{'}'} variables</p>
 
         <div className="form-grid">

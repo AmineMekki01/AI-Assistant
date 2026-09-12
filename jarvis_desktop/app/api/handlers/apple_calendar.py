@@ -2,6 +2,7 @@
 import asyncio
 import sys
 import json
+import time
 from pathlib import Path
 from aiohttp import web
 
@@ -53,7 +54,10 @@ async def handle_apple_calendar_test(request):
         "enabled": True,
         "available": sys.platform == "darwin",
         "ok": ok,
-        "lastTested": asyncio.get_event_loop().time(),
+        # Persist wall-clock seconds because the UI renders this as a date.
+        # asyncio's event-loop clock is monotonic and cannot be converted to a
+        # meaningful calendar timestamp.
+        "lastTested": time.time(),
         "error": err,
     }))
 

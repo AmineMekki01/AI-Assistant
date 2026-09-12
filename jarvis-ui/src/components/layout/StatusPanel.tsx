@@ -29,7 +29,7 @@ export function StatusPanel({ isRecording, isSpeaking, systemMetrics, voiceDebug
     >
       <div className="panel-header">
         <Activity size={18} />
-        <span>System Status</span>
+        <h2>At a glance</h2>
       </div>
 
       <div className="status-grid">
@@ -38,7 +38,7 @@ export function StatusPanel({ isRecording, isSpeaking, systemMetrics, voiceDebug
           <span className={`status-value ${systemMetrics?.status === 'ok' ? 'active' : ''}`}>{locationValue}</span>
         </div>
         <div className="status-item">
-          <span className="status-label"><ThermometerSun size={12} /> Temperature</span>
+          <span className="status-label"><ThermometerSun size={12} /> Weather</span>
           <span className={`status-value ${systemMetrics?.temperature != null ? 'active' : ''}`}>
             {temperatureValue}
           </span>
@@ -50,19 +50,19 @@ export function StatusPanel({ isRecording, isSpeaking, systemMetrics, voiceDebug
           <span className="status-note">Backend round-trip</span>
         </div>
         <div className="status-item">
-          <span className="status-label"><Mic size={12} /> Audio Stream</span>
+          <span className="status-label"><Waves size={12} /> Voice</span>
           <span className={`status-value ${isRecording ? 'active' : ''}`}>
-            {isRecording ? 'ACTIVE' : 'STANDBY'}
+            {isRecording ? 'Listening' : 'Standby'}
           </span>
         </div>
         <div className="status-item">
-          <span className="status-label"><Bot size={12} /> Neural Net</span>
+          <span className="status-label"><Bot size={12} /> Assistant</span>
           <span className={`status-value ${isSpeaking ? 'active' : ''}`}>
-            {isSpeaking ? 'PROCESSING' : 'IDLE'}
+            {isSpeaking ? 'Speaking' : 'Idle'}
           </span>
         </div>
-        <div className="status-item status-item-voice">
-          <span className="status-label"><ShieldAlert size={12} /> Voice Diagnostics</span>
+        <details className="status-item status-item-voice">
+          <summary className="status-label"><ShieldAlert size={12} /> Voice diagnostics</summary>
           <span className={`status-value ${voiceDebug?.armed ? 'active' : ''}`}>{listenerValue}</span>
           <span className="status-note">{voiceStatus}</span>
           <div className="voice-chip-row">
@@ -74,7 +74,7 @@ export function StatusPanel({ isRecording, isSpeaking, systemMetrics, voiceDebug
           <span className="status-note compact">
             Cooldown {voiceDebug ? `${voiceDebug.cooldownRemaining.toFixed(1)}s` : 'n/a'} · Mic resume {voiceDebug ? `${voiceDebug.micResumeRemaining.toFixed(1)}s` : 'n/a'} · Window {voiceDebug ? `${voiceDebug.listenWindowRemaining.toFixed(1)}s` : 'n/a'}
           </span>
-        </div>
+        </details>
       </div>
     </motion.aside>
   )
