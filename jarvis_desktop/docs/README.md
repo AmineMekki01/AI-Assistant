@@ -1,7 +1,6 @@
 # JARVIS documentation
 
-These pages describe the backend as it runs today. Start here when setting up
-the project or tracing a request through the system.
+These pages describe the backend as it runs today. Start here when setting up the project or tracing a request through the system.
 
 | Page | Use it for |
 | --- | --- |
@@ -15,5 +14,4 @@ the project or tracing a request through the system.
 | [Operations](operations.md) | Configure ports and timeouts, inspect health, and diagnose common failures. |
 | [Refactoring roadmap](refactoring-roadmap.md) | See completed boundaries and the safe order for the remaining cleanup. |
 
-The frontend has its own build and runtime. This documentation covers the
-Python backend in `jarvis_desktop/`.
+The frontend has its own build and runtime. This documentation covers the Python backend in `jarvis_desktop/`.

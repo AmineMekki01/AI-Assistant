@@ -1,8 +1,6 @@
 # Architecture
 
-`main.py` loads `.env`, creates the application, and starts it. It keeps a
-small adapter for older imports, but new backend code should use
-`AssistantApplication` directly.
+`main.py` loads `.env`, creates the application, and starts it. It keeps a small adapter for older imports, but new backend code should use `AssistantApplication` directly.
 
 ```text
 React UI
@@ -30,43 +28,27 @@ AssistantApplication
 
 ## Ownership
 
-`AssistantApplication` is the composition root. It creates the shared session,
-event loop, bridge, and application controllers. It does not decide how a wake
-word is detected or how audio is played.
+`AssistantApplication` is the composition root. It creates the shared session, event loop, bridge, and application controllers. It does not decide how a wake word is detected or how audio is played.
 
-`NativeVoiceController` owns listener state: wake word, follow-up window,
-speaker verification, and the current recording. `MicrophoneCapture` owns the
-PortAudio loop and feeds accepted PCM audio to the controller.
+`NativeVoiceController` owns listener state: wake word, follow-up window, speaker verification, and the current recording. `MicrophoneCapture` owns the PortAudio loop and feeds accepted PCM audio to the controller.
 
-`AudioPlayback` owns streamed assistant PCM, the speaking state reported to the
-UI, and temporary music-volume ducking. It is the only component that releases
-the playback speaking state after queued audio ends.
+`AudioPlayback` owns streamed assistant PCM, the speaking state reported to the UI, and temporary music-volume ducking. It is the only component that releases the playback speaking state after queued audio ends.
 
-`RealtimeSession` is the direct OpenAI Realtime connection. It streams model
-audio and transcripts, sends user audio or text, and dispatches model tool
-calls through the registry.
+`RealtimeSession` is the direct OpenAI Realtime connection. It streams model audio and transcripts, sends user audio or text, and dispatches model tool calls through the registry.
 
-`WebSocketBridge` transports browser events and serves the small HTTP API. It
-does not reason, decide when a spoken turn ends, or maintain the conversation.
+`WebSocketBridge` transports browser events and serves the small HTTP API. It does not reason, decide when a spoken turn ends, or maintain the conversation.
 
-`app/knowledge/` owns the Obsidian retrieval path. Its Markdown chunker creates
-contextual document chunks, its indexer writes dense and BM25 vectors to
-Qdrant, and its searcher fuses the two result lists. API handlers and agent
-tools call this package; they do not implement retrieval rules themselves.
+`app/knowledge/` owns the Obsidian retrieval path. Its Markdown chunker creates contextual document chunks, its indexer writes dense and BM25 vectors to Qdrant, and its searcher fuses the two result lists. API handlers and agent tools call this package; they do not implement retrieval rules themselves.
 
 ## A voice turn
 
-1. The native listener hears the wake word, or accepts ordinary speech while a
-   follow-up window is open.
+1. The native listener hears the wake word, or accepts ordinary speech while a follow-up window is open.
 2. It starts a recording and sends 16 kHz PCM chunks to `RealtimeInputStream`.
-3. The input stream verifies the speaker when verification is enabled, converts
-   accepted PCM to the Realtime format, then commits the turn.
+3. The input stream verifies the speaker when verification is enabled, converts accepted PCM to the Realtime format, then commits the turn.
 4. `RealtimeSession` streams transcript and assistant audio events back.
-5. `AudioPlayback` writes audio to the output device and marks JARVIS as
-   speaking. When playback ends, it opens the follow-up listening window.
+5. `AudioPlayback` writes audio to the output device and marks JARVIS as speaking. When playback ends, it opens the follow-up listening window.
 
-Typed requests use the same `RealtimeSession`; they are queued if a response
-is still active so one conversation owns all turns.
+Typed requests use the same `RealtimeSession`; they are queued if a response is still active so one conversation owns all turns.
 
 ## Boundaries that matter
 
@@ -75,5 +57,4 @@ is still active so one conversation owns all turns.
 - Put delegated, tool-using reasoning workflows in `app/agents/`.
 - Keep storage and external I/O out of microphone and audio-playback loops.
 - Keep chunking, embedding, and Qdrant query details in `app/knowledge/`.
-- Do not add another conversation engine beside `RealtimeSession`; it is the
-  source of truth for the live conversation.
+- Do not add another conversation engine beside `RealtimeSession`; it is the source of truth for the live conversation.

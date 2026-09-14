@@ -2,9 +2,7 @@
 
 ## Configuration
 
-Put secrets and local choices in `jarvis_desktop/.env`. Saved UI preferences,
-including wake-word settings and service configuration, live in
-`~/.jarvis/settings.json`.
+Put secrets and local choices in `jarvis_desktop/.env`. Saved UI preferences, including wake-word settings and service configuration, live in `~/.jarvis/settings.json`.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -30,9 +28,7 @@ curl http://localhost:8001/api/qdrant/status
 curl -X POST http://localhost:8001/api/apple_calendar/test
 ```
 
-The browser status panel and backend logs are the best place to inspect the
-voice state. The listener emits a heartbeat every few seconds with its armed,
-speaking, music, follow-up, cooldown, and microphone-resume state.
+The browser status panel and backend logs are the best place to inspect the voice state. The listener emits a heartbeat every few seconds with its armed, speaking, music, follow-up, cooldown, and microphone-resume state.
 
 ## Failure guide
 
