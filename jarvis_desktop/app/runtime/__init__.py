@@ -7,6 +7,7 @@ from .registry import (
     RegistryEntry,
     tool,
     action,
+    skill,
     agent,
     load_all_capabilities,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "RegistryEntry",
     "tool",
     "action",
+    "skill",
     "agent",
     "Agent",
     "DEFAULT_AGENT_PARAMETERS",

@@ -5,7 +5,7 @@ dist/
 build/
 .DS_Store
 jarvis_desktop/scripts/
-jarvis_desktop/docs/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -28,6 +28,20 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _env_csv(name: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in os.getenv(name, "").split(",") if item.strip())
+
+
 class Settings:
     """Application settings loaded from environment variables."""
     
@@ -59,6 +73,21 @@ class Settings:
     speaker_profile_path: str = os.path.expanduser(
         os.getenv("JARVIS_SPEAKER_PROFILE_PATH", "~/.jarvis/voice/speaker_profile.json")
     )
+    # Runtime wiring. Keeping these here makes local, Docker, and packaged
+    # launches use the same configuration surface.
+    server_host: str = os.getenv("JARVIS_HOST", "localhost")
+    websocket_port: int = _env_int("JARVIS_WEBSOCKET_PORT", 8000)
+    api_port: int = _env_int("JARVIS_API_PORT", 8001)
+    capability_timeout_seconds: float = _env_float("JARVIS_CAPABILITY_TIMEOUT_SECONDS", 90.0)
+    disabled_capabilities: tuple[str, ...] = _env_csv("JARVIS_DISABLED_CAPABILITIES")
+    extra_capability_modules: tuple[str, ...] = _env_csv("JARVIS_CAPABILITY_MODULES")
+
+    # Voice timing is deliberately configurable: it is the primary control
+    # for the hands-free follow-up window and recording safety limits.
+    voice_followup_seconds: float = _env_float("JARVIS_VOICE_FOLLOWUP_SECONDS", 300.0)
+    voice_max_recording_seconds: float = _env_float("JARVIS_VOICE_MAX_RECORDING_SECONDS", 24.0)
+    voice_mic_resume_seconds: float = _env_float("JARVIS_VOICE_MIC_RESUME_SECONDS", 0.2)
+    music_duck_target_volume: int = _env_int("JARVIS_MUSIC_DUCK_TARGET_VOLUME", 38)
 
     @property
     def personal_info(self) -> dict:

@@ -7,10 +7,11 @@ import importlib
 import inspect
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..core.logging import StructuredLog
+from .catalog import capability_module_paths
 
 
 log = StructuredLog(__name__)
@@ -45,6 +46,13 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._entries: Dict[str, RegistryEntry] = {}
+        self._disabled: set[str] = set()
+        self._timeout_seconds: float = 90.0
+
+    def configure(self, *, disabled: tuple[str, ...] | list[str] = (), timeout: float | None = None) -> None:
+        """Set runtime policy without changing registered capabilities."""
+        self._disabled = {name.strip() for name in disabled if name.strip()}
+        self._timeout_seconds = timeout if timeout and timeout > 0 else 90.0
 
     def register(self, entry: RegistryEntry) -> None:
         if entry.name in self._entries:
@@ -75,9 +83,9 @@ class ToolRegistry:
 
     def as_openai_tool_list(self) -> List[Dict[str, Any]]:
         """Schemas in a stable order (tools -> actions -> agents, then alpha)."""
-        order = {"tool": 0, "action": 1, "agent": 2}
+        order = {"tool": 0, "action": 1, "skill": 2, "agent": 3}
         entries = sorted(
-            self._entries.values(),
+            (entry for entry in self._entries.values() if entry.name not in self._disabled),
             key=lambda e: (order.get(e.kind, 99), e.name),
         )
         return [e.as_openai_schema() for e in entries]
@@ -107,6 +115,8 @@ class ToolRegistry:
                 "ok": False,
                 "error": f"Unknown capability: {name}",
             }
+        if name in self._disabled:
+            return {"ok": False, "error": f"Capability disabled: {name}"}
 
         safe_args = args if isinstance(args, dict) else {}
         t0 = time.perf_counter()
@@ -118,7 +128,10 @@ class ToolRegistry:
         )
 
         try:
-            result = await entry.handler(**safe_args)
+            result = await asyncio.wait_for(entry.handler(**safe_args), self._timeout_seconds)
+        except asyncio.TimeoutError:
+            log.error("registry.call.timeout", name=entry.name, timeout=self._timeout_seconds)
+            return {"ok": False, "error": f"{name} timed out"}
         except TypeError as e:
             log.error("registry.call.bad_args", name=entry.name, error=str(e))
             return {"ok": False, "error": f"Invalid arguments for {name}: {e}"}
@@ -183,54 +196,24 @@ def _decorator(kind: str):
 tool = _decorator("tool")
 action = _decorator("action")
 agent = _decorator("agent")
+skill = _decorator("skill")
 
-_TOOL_MODULES = (
-    "app.tools.websearch",
-    "app.tools.knowledge",
-    "app.tools.memory",
-    "app.tools.music_library",
-    "app.tools.music_playback",
-    "app.tools.system_control",
-    "app.tools.datetime_tool",
-    "app.tools.quick_notes",
-    "app.tools.reminders",
-    "app.tools.mail_templates",
-)
-
-_ACTION_MODULES = (
-    "app.actions.mail",
-    "app.actions.calendar",
-    "app.actions.music_play",
-)
-
-_AGENT_MODULES: tuple[str, ...] = (
-    "app.agents.research",
-    "app.agents.briefing",
-    "app.agents.startup_briefing",
-    "app.agents.workspace",
-    "app.agents.focus",
-    "app.agents.meeting_prep",
-)
+_loaded_modules: set[str] = set()
 
 
-_loaded = False
-
-
-def load_all_capabilities() -> ToolRegistry:
-    """Import every capability module exactly once, triggering registration.
+def load_all_capabilities(extra_modules: tuple[str, ...] | list[str] = ()) -> ToolRegistry:
+    """Import configured capability modules, triggering registration.
 
     Safe to call multiple times - subsequent calls are no-ops. Returns the
     global :data:`REGISTRY` for convenience so the caller can chain
     ``.as_openai_tool_list()`` etc.
     """
-    global _loaded
-    if _loaded:
-        return REGISTRY
-
-    for mod_path in _TOOL_MODULES + _ACTION_MODULES + _AGENT_MODULES:
+    for mod_path in capability_module_paths(extra_modules):
+        if mod_path in _loaded_modules:
+            continue
         importlib.import_module(mod_path)
+        _loaded_modules.add(mod_path)
 
-    _loaded = True
     log.info(
         "registry.loaded",
         total=len(REGISTRY.list_names()),

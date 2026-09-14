@@ -32,10 +32,12 @@ class WebSocketBridge:
         on_mail_confirmation: Optional[Callable[[dict[str, Any]], None]] = None,
         on_recording_cancel: Optional[Callable[[], None]] = None,
         host: str = "localhost",
-        port: int = 8000
+        port: int = 8000,
+        api_port: Optional[int] = None,
     ):
         self.host = host
         self.port = port
+        self.api_port = api_port if api_port is not None else port + 1
         self.on_transcript = on_transcript
         self.on_audio = on_audio
         self._on_commit = on_commit
@@ -105,9 +107,9 @@ class WebSocketBridge:
             
             runner = web.AppRunner(app)
             await runner.setup()
-            site = web.TCPSite(runner, self.host, self.port + 1)
+            site = web.TCPSite(runner, self.host, self.api_port)
             await site.start()
-            print(f"🚀 HTTP API ready at http://{self.host}:{self.port + 1}")
+            print(f"🚀 HTTP API ready at http://{self.host}:{self.api_port}")
         
         self.loop.run_until_complete(start_servers())
         

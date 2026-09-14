@@ -409,7 +409,8 @@ class RealtimeSession:
                  on_status: Optional[Callable[[str, str], None]] = None,
                  on_speaking: Optional[Callable[[bool], None]] = None,
                  on_mail_draft: Optional[Callable[[dict[str, Any]], None]] = None,
-                 on_response_start: Optional[Callable[[str], None]] = None):
+                 on_response_start: Optional[Callable[[str], None]] = None,
+                 registry=None):
         self.api_key = os.getenv("OPENAI_API_KEY", "")
         self.ws: Optional[ClientConnection] = None
         self._pump_task: Optional[asyncio.Task] = None
@@ -419,8 +420,10 @@ class RealtimeSession:
         self.on_speaking = on_speaking
         self.on_mail_draft = on_mail_draft
         self.on_response_start = on_response_start
-        load_all_capabilities()
-        self.tools = REGISTRY.as_openai_tool_list()
+        self.registry = registry or REGISTRY
+        if registry is None:
+            load_all_capabilities()
+        self.tools = self.registry.as_openai_tool_list()
         self._reconnect_lock: Optional[asyncio.Lock] = None
         self._intentional_close = False
         self._tool_tasks: set[asyncio.Task] = set()
@@ -1087,7 +1090,7 @@ class RealtimeSession:
             if valid_args:
                 if name == 'mail_send' and args.get('confirmed') and self.on_mail_draft:
                     self.on_mail_draft({'cleared': True})
-                result = await asyncio.wait_for(REGISTRY.call(name, args), timeout=90.0)
+                result = await self.registry.call(name, args)
             else:
                 result = {"ok": False, "error": "Invalid arguments; no action was executed."}
         except asyncio.TimeoutError:
@@ -1104,7 +1107,7 @@ class RealtimeSession:
 
         log.info(
             "⏱️ TOOL_CALL_DURATION",
-            name=name, kind=REGISTRY.kind_of(name) or "?",
+            name=name, kind=self.registry.kind_of(name) or "?",
             seconds=f"{dispatch_time:.2f}",
         )
 
