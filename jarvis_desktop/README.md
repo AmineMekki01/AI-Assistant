@@ -78,6 +78,7 @@ The [documentation index](docs/README.md) links to the complete backend guide.
 | Diagnose wake word, follow-up, cut-off, and verification issues | [Voice](docs/voice.md) |
 | Run and understand Qdrant memory | [Memory](docs/memory.md) |
 | Understand Obsidian chunking and hybrid search | [Knowledge retrieval](docs/knowledge.md) |
+| Review persona prompts and context budgets | [Prompts and context](docs/prompts-and-context.md) |
 | Add a tool, action, skill, or agent | [Capabilities](docs/capabilities.md) |
 | Configure and operate the backend | [Operations](docs/operations.md) |
 | Follow the remaining cleanup work | [Refactoring roadmap](docs/refactoring-roadmap.md) |

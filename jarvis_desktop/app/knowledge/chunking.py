@@ -150,9 +150,6 @@ def chunk_markdown(
             current.append(piece)
             current_size += (2 if current_size else 0) + len(piece)
     flush()
-
-    # Plain text with no blank lines is represented by one block, but this
-    # guard makes the public function robust if the parser ever changes.
     return chunks or [Chunk(text=text, index=0)]
 
 

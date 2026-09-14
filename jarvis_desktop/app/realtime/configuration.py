@@ -51,11 +51,14 @@ class RealtimeSessionConfiguration:
                 },
                 "tools": tools,
                 "tool_choice": "auto",
-                "max_output_tokens": 2048,
+                # Voice replies are intentionally short. This leaves room for
+                # the conversation and tool schemas instead of reserving a
+                # large completion budget on every live turn.
+                "max_output_tokens": 1024,
                 "truncation": {
                     "type": "retention_ratio",
                     "retention_ratio": 0.8,
-                    "token_limits": {"post_instructions": 16000},
+                    "token_limits": {"post_instructions": 12000},
                 },
             },
         }

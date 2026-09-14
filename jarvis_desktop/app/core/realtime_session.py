@@ -27,6 +27,7 @@ from ..realtime.configuration import (
 from ..realtime.tool_dispatcher import RealtimeToolDispatcher
 from ..realtime.persona_context import (
     connected_services_block as _connected_services_block,
+    addressing_block as _addressing_block,
     current_context_block as _current_context_block,
     detect_integrations as _detect_integrations,
     fetch_apple_calendars as _fetch_apple_calendars,
@@ -39,6 +40,9 @@ from ..actions.mail_draft import parse_mail_draft_preview
 from ..runtime import REGISTRY, load_all_capabilities
 
 log = StructuredLog(__name__)
+
+RECENT_HISTORY_ITEMS = 12
+RECENT_HISTORY_TEXT_CHARS = 900
 
 # IPv4-only WebSocket connect helper
 async def _websockets_connect_ipv4(uri, **kwargs):
@@ -59,7 +63,7 @@ def get_jarvis_persona() -> str:
     settings = get_settings()
     personal = settings.personal_info
 
-    user_name = personal.get("name") or "sir"
+    user_name = personal.get("name") or ""
     location = personal.get("defaultLocation", "")
     timezone = personal.get("timezone", "")
 
@@ -70,17 +74,18 @@ def get_jarvis_persona() -> str:
 
     integrations = _detect_integrations()
     apple_calendars = _fetch_apple_calendars() if integrations["apple_calendar"] else []
-    memory_primer = _fetch_memory_primer(8)
+    memory_primer = _fetch_memory_primer()
 
     persona = f"""You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), the refined
-British AI butler modelled on Tony Stark's personal assistant. You address the user as
-"{user_name}" or "sir". Speak with a calm, composed, sophisticated British tone - polite,
-articulate, and subtly dry-witted. Use slightly formal phrasing sparingly; do not
-repeat the same opener in every reply. Never use casual filler words.
+British AI butler modelled on Tony Stark's personal assistant. Speak with a calm,
+composed, sophisticated British tone: polite, articulate, and subtly dry-witted.
+Use slightly formal phrasing sparingly. Never use casual filler words.
 Keep spoken replies brief and direct (usually 1-2 sentences) unless the user asks
 for detail.
 
 {_response_style_block()}
+
+{_addressing_block(user_name)}
 
 {_current_context_block(date_str, time_str, tz_str, location)}
 
@@ -257,7 +262,7 @@ class RealtimeSession:
         self._tts_process = None
         self._speech_generation = 0
         self._configured = False
-        self._recent_history = deque(maxlen=24)
+        self._recent_history = deque(maxlen=RECENT_HISTORY_ITEMS)
         self._user_history_placeholders = {}
         self._seen_transcripts = set()
         self._connection_generation = 0
@@ -700,10 +705,10 @@ class RealtimeSession:
         placeholder = self._user_history_placeholders.pop(item_id, None)
         for index, entry in enumerate(self._recent_history):
             if entry is placeholder:
-                self._recent_history[index] = ('user', transcript[:2000])
+                self._recent_history[index] = ('user', transcript[:RECENT_HISTORY_TEXT_CHARS])
                 break
         else:
-            self._recent_history.append(("user", transcript[:2000]))
+            self._recent_history.append(("user", transcript[:RECENT_HISTORY_TEXT_CHARS]))
 
     def _cancel_auto_response_if_pending(self) -> None:
         if self._auto_response_pending:
@@ -759,7 +764,7 @@ class RealtimeSession:
         if evt_type in {"response.audio_transcript.done", "response.output_audio_transcript.done", "response.output_text.done"}:
             if self.response_buffer:
                 log.info("🤖 JARVIS_SAID", text=self.response_buffer[:200])
-                self._recent_history.append(("assistant", self.response_buffer[:2000]))
+                self._recent_history.append(("assistant", self.response_buffer[:RECENT_HISTORY_TEXT_CHARS]))
 
     async def _handle_tool_call_event(self, evt_type: str, data: dict[str, Any]) -> None:
         # Wait for response.done so all calls are known and can be continued once.
