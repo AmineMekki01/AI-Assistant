@@ -6,12 +6,10 @@ import asyncio
 import base64
 import json
 import os
-import re
 import shutil
 import socket
 import sys
 import tempfile
-import textwrap
 from collections import deque
 import uuid
 from typing import Any, AsyncIterator, Callable, Optional
@@ -21,185 +19,37 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 
 from .logging import StructuredLog
+from ..realtime.configuration import (
+    INPUT_SAMPLE_RATE,
+    OUTPUT_SAMPLE_RATE,
+    RealtimeSessionConfiguration,
+)
+from ..realtime.tool_dispatcher import RealtimeToolDispatcher
+from ..realtime.persona_context import (
+    connected_services_block as _connected_services_block,
+    current_context_block as _current_context_block,
+    detect_integrations as _detect_integrations,
+    fetch_apple_calendars as _fetch_apple_calendars,
+    fetch_memory_primer as _fetch_memory_primer,
+    memory_block as _memory_block,
+    response_style_block as _response_style_block,
+    transcription_prompt as _transcription_prompt,
+)
+from ..actions.mail_draft import parse_mail_draft_preview
 from ..runtime import REGISTRY, load_all_capabilities
 
 log = StructuredLog(__name__)
 
-# ---------------------------------------------------------------------------
 # IPv4-only WebSocket connect helper
-# ---------------------------------------------------------------------------
-# Use the socket family's supported connect option. Never replace process-wide
-# DNS resolution while other speech and tool requests are running.
-# ---------------------------------------------------------------------------
 async def _websockets_connect_ipv4(uri, **kwargs):
     """Call ``websockets.connect`` with IPv4-only DNS resolution."""
     return await websockets.connect(uri, family=socket.AF_INET, **kwargs)
-
-
-INPUT_SAMPLE_RATE = 24000
-OUTPUT_SAMPLE_RATE = 24000
 
 
 def _realtime_url() -> str:
     from .config import get_settings
     model = get_settings().openai_realtime_model
     return f"wss://api.openai.com/v1/realtime?model={model}"
-
-def _detect_integrations() -> dict:
-    """Inspect on-disk state to figure out which integrations are live."""
-    import json as _json
-    from pathlib import Path as _Path
-
-    home = _Path.home()
-    settings_path = home / ".jarvis" / "settings.json"
-    settings: dict = {}
-    try:
-        if settings_path.exists():
-            settings = _json.loads(settings_path.read_text()) or {}
-    except Exception:
-        settings = {}
-
-    google_connected = (home / ".jarvis" / "google_token.json").exists()
-    z = settings.get("zimbra") or {}
-    zimbra_configured = bool(z.get("enabled") and z.get("email") and z.get("password"))
-    ac = settings.get("appleCalendar") or {}
-    apple_cal_enabled = bool(ac.get("enabled"))
-
-    obsidian_count = 0
-    try:
-        ob_status = home / ".jarvis" / "obsidian_status.json"
-        if ob_status.exists():
-            data = _json.loads(ob_status.read_text()) or {}
-            if data.get("synced"):
-                obsidian_count = int(data.get("fileCount") or 0)
-    except Exception:
-        pass
-
-    return {
-        "google": google_connected,
-        "zimbra": zimbra_configured,
-        "apple_calendar": apple_cal_enabled,
-        "obsidian_notes": obsidian_count,
-        "default_apple_calendar": ac.get("defaultCalendar", ""),
-    }
-
-
-def _fetch_apple_calendars() -> list:
-    """List the user's macOS Calendar names (best effort, silent on failure)."""
-    import subprocess as _subprocess
-    import sys as _sys
-    if _sys.platform != "darwin":
-        return []
-    try:
-        proc = _subprocess.run(
-            ["osascript", "-e", 'tell application "Calendar" to return name of every calendar'],
-            capture_output=True, text=True, timeout=6,
-        )
-        if proc.returncode != 0:
-            return []
-        return [n.strip() for n in (proc.stdout or "").split(",") if n.strip()]
-    except Exception:
-        return []
-
-
-def _fetch_memory_primer(limit: int = 8) -> str:
-    """Best-effort Qdrant-only primer; called off the voice event loop."""
-    import os as _os
-    qdrant_url = _os.getenv("QDRANT_URL", "http://localhost:6333")
-    collection = _os.getenv("QDRANT_MEMORY_COLLECTION", "long_term_memory")
-    user_id = _os.getenv("JARVIS_USER_ID", "user")
-    try:
-        import httpx as _httpx
-        with _httpx.Client(timeout=4.0) as http:
-            resp = http.post(
-                f"{qdrant_url}/collections/{collection}/points/scroll",
-                json={
-                    "limit": max(1, min(int(limit) * 4, 100)),
-                    "with_payload": True,
-                    "with_vector": False,
-                    "filter": {"must": [{"key": "user_id", "match": {"value": user_id}}]},
-                },
-            )
-            if resp.status_code == 200:
-                points = (resp.json().get("result") or {}).get("points") or []
-                points.sort(key=lambda p: ((p.get("payload", {}) or {}).get("importance", 0.5),
-                                           (p.get("payload", {}) or {}).get("updated_at", "")), reverse=True)
-                lines = []
-                for p in points[:limit]:
-                    pl = p.get("payload", {}) or {}
-                    lines.append(f"- [{pl.get('category', 'other')}; importance {float(pl.get('importance', 0.5)):.2f}] {pl.get('content', '')}")
-                return "\n".join(lines)
-    except Exception:
-        pass
-
-    return ""
-
-
-def _response_style_block() -> str:
-    return """── Response style ────────────────────────────────────────────────
-  • Answer the user's question first.
-  • Avoid reintroducing yourself or repeating "Certainly, sir" unless the user has
-    just made a request that needs a brief acknowledgment.
-  • Prefer plain, natural English over ornate or overly ceremonial wording.
-  • If the answer is simple, keep it simple. Do not pad with extra reassurance.
-  • This brevity rule does NOT apply to delegated briefings or other
-    explicitly requested multi-part summaries. In those cases, speak the full
-    answer clearly and do not compress it into a one-line recap.
-  • For delegated briefings, the briefing result is already the final answer.
-    Speak it back as-is, in full, without adding a wrapper like "That’s your
-    daily briefing", without summarising it, and without appending a question.
-  • If the user asks for a greeting or says something like "say hi", answer with
-    one short greeting sentence only. Do not add a follow-up question unless the user
-    explicitly asks for conversation.
-  • If the user asks "how are you" / "how are you doing" / similar status checks,
-    answer with a brief status only and do not start with "good morning/afternoon/evening".
-    Do not add a follow-up question.
-"""
-
-
-def _current_context_block(date_str: str, time_str: str, tz_str: str, location: str) -> str:
-    return f"""── Current context ──────────────────────────────────────────────
-  • Date: {date_str}
-  • Time: {time_str} ({tz_str})
-  • Location: {location or 'unknown'}
-"""
-
-
-def _connected_services_block(integrations: dict[str, Any], apple_calendars: list[str]) -> str:
-    int_lines = [
-        f"  • Gmail / Google Calendar: {'connected' if integrations['google'] else 'NOT connected'}",
-        f"  • Zimbra / OVH mail: {'connected' if integrations['zimbra'] else 'not configured'}",
-        f"  • Apple Calendar: {'enabled' if integrations['apple_calendar'] else 'disabled'}"
-        + (f" (calendars: {', '.join(apple_calendars[:8])})" if apple_calendars else ""),
-        f"  • Obsidian vault: {integrations['obsidian_notes']} note(s) indexed"
-        if integrations['obsidian_notes'] else "  • Obsidian vault: not synced",
-    ]
-
-    return f"""── Connected services ───────────────────────────────────────────
-{chr(10).join(int_lines)}
-"""
-
-
-def _memory_block(memory_primer: str) -> str:
-    mem_block = memory_primer.strip() if memory_primer and memory_primer.strip() else "(none yet)"
-    return f"""── What you already know about the user ─────────────────────────
-{mem_block}
-"""
-
-
-def _transcription_prompt(user_name: str) -> str:
-    cleaned_name = user_name.strip()
-    if not cleaned_name or cleaned_name.lower() == "sir":
-        return ""
-
-    return (
-        "Transcribe the user's speech verbatim. "
-        "Preserve names and proper nouns exactly as spoken. "
-        "Preserve the wake word 'Jarvis' exactly if it is spoken. "
-        f"Preserve the user's name '{cleaned_name}' exactly if it is spoken. "
-        "Do not substitute similar names when audio is unclear."
-    )
-
 
 def get_jarvis_persona() -> str:
     """Generate the JARVIS system prompt with live context injected at session start."""
@@ -373,32 +223,9 @@ def _voice_layer_instructions() -> str:
     )
 
 
-def _parse_mail_draft_preview(output: str) -> dict[str, Any] | None:
-    """Parse the structured draft preview returned by mail_send."""
-    if not output.startswith("DRAFT (not sent yet - ask the user to confirm):"):
-        return None
-
-    pattern = re.compile(
-        r"^DRAFT \(not sent yet - ask the user to confirm\):\n"
-        r"\s+Account:\s*(?P<account>gmail|zimbra)\n"
-        r"\s+To:\s*(?P<to>.+)\n"
-        r"\s+Subject:\s*(?P<subject>.+)\n"
-        r"\s+Body:\n"
-        r"(?P<body>[\s\S]*?)(?:\n\nRead this draft back|\Z)",
-        re.IGNORECASE,
-    )
-    match = pattern.match(output)
-    if not match:
-        return None
-
-    body = textwrap.dedent(match.group("body")).rstrip()
-    return {
-        "account": match.group("account").lower(),
-        "to": match.group("to").strip(),
-        "subject": match.group("subject").strip(),
-        "body": body,
-        "rawText": output,
-    }
+# Kept as a private alias while third-party integrations move to
+# ``app.actions.mail_draft.parse_mail_draft_preview``.
+_parse_mail_draft_preview = parse_mail_draft_preview
 
 
 class RealtimeSession:
@@ -433,8 +260,16 @@ class RealtimeSession:
         self._recent_history = deque(maxlen=24)
         self._user_history_placeholders = {}
         self._seen_transcripts = set()
-        self._seen_tool_calls = set()
         self._connection_generation = 0
+        self._tool_dispatcher = RealtimeToolDispatcher(
+            registry=self.registry,
+            send_event=lambda event: self.send_event(event),
+            request_response=lambda: self.request_response(),
+            connection_generation=lambda: self._connection_generation,
+            status=lambda state, message: self.on_status(state, message) if self.on_status else None,
+            mail_draft=lambda draft: self.on_mail_draft(draft) if self.on_mail_draft else None,
+        )
+        self._seen_tool_calls = self._tool_dispatcher.seen_call_ids
         self._reset_runtime_state()
 
     def _reset_runtime_state(self) -> None:
@@ -548,54 +383,11 @@ class RealtimeSession:
     def _build_session_config(self, realtime_tools: list[dict[str, Any]]) -> dict[str, Any]:
         """Build the session.update payload sent to the Realtime API."""
         from app.core.config import get_settings
-
-        app_settings = get_settings()
-        personal = app_settings.personal_info
-        user_name = personal.get("name") or ""
-        transcription_prompt = _transcription_prompt(user_name)
-
-        input_audio_transcription: dict[str, Any] = {
-            "model": "whisper-1",
-            "language": "en",
-        }
-        if transcription_prompt:
-            input_audio_transcription["prompt"] = transcription_prompt
-
-        session: dict[str, Any] = {
-            "type": "realtime",
-            "model": app_settings.openai_realtime_model,
-            "instructions": get_jarvis_persona(),
-            "output_modalities": ["audio"],
-            "audio": {
-                "input": {
-                    "format": {
-                        "type": "audio/pcm",
-                        "rate": INPUT_SAMPLE_RATE,
-                    },
-                    "transcription": input_audio_transcription,
-                    # Native Silero VAD owns the commit boundary. A second
-                    # server VAD would split the same utterance independently.
-                    "turn_detection": None,
-                },
-                "output": {
-                    "format": {
-                        "type": "audio/pcm",
-                        "rate": 24000,
-                    },
-                    "voice": app_settings.openai_realtime_voice,
-                    "speed": 1,
-                },
-            },
-            "tools": realtime_tools,
-            "tool_choice": "auto",
-            "max_output_tokens": 2048,
-            "truncation": {"type": "retention_ratio", "retention_ratio": 0.8,
-                           "token_limits": {"post_instructions": 16000}},
-        }
-        return {
-            "type": "session.update",
-            "session": session,
-        }
+        return RealtimeSessionConfiguration(
+            settings_provider=get_settings,
+            persona_provider=get_jarvis_persona,
+            transcription_prompt_provider=_transcription_prompt,
+        ).build(realtime_tools)
 
     def _build_response_create_event(self) -> dict[str, Any]:
         return {
@@ -1053,98 +845,8 @@ class RealtimeSession:
                 self._response_done_event.set()
     
     async def _handle_tool_call(self, data: dict, *, continue_response: bool = True) -> None:
-        """Handle a tool/action/agent call from the model via the registry."""
-        call_id = data.get("call_id", "")
-        name = data.get("name", "")
-        arguments = data.get("arguments", "{}")
-        if call_id in self._seen_tool_calls:
-            return
-        self._seen_tool_calls.add(call_id)
-        generation = self._connection_generation
-
-        log.info("🔧 TOOL_CALL_START", name=name, call_id=call_id)
-        log.info("📥 TOOL_CALL_ARGS", name=name, args=arguments)
-
-        valid_args = True
-        try:
-            args = json.loads(arguments or "{}")
-            if not isinstance(args, dict):
-                raise ValueError("Arguments must be an object")
-        except (ValueError, TypeError):
-            args, valid_args = {}, False
-
-        dispatch_start = asyncio.get_event_loop().time()
-        briefing_status_sent = False
-        if name == "delegate_to_briefing" and self.on_status:
-            try:
-                self.on_status(
-                    "connected",
-                    "Hang on please while i look into that for you...",
-                )
-                briefing_status_sent = True
-            except Exception as e:
-                log.debug("status.emit_failed", name=name, error=str(e))
-
-        result: dict[str, Any] = {"ok": False, "error": "Unknown error"}
-        try:
-            if valid_args:
-                if name == 'mail_send' and args.get('confirmed') and self.on_mail_draft:
-                    self.on_mail_draft({'cleared': True})
-                result = await self.registry.call(name, args)
-            else:
-                result = {"ok": False, "error": "Invalid arguments; no action was executed."}
-        except asyncio.TimeoutError:
-            result = {"ok": False, "error": "Action timed out. Completion is unknown; do not retry automatically."}
-        except Exception as error:
-            result = {"ok": False, "error": str(error)}
-        finally:
-            dispatch_time = asyncio.get_event_loop().time() - dispatch_start
-            if briefing_status_sent and self.on_status:
-                try:
-                    self.on_status("connected", "J.A.R.V.I.S. SYSTEM ONLINE")
-                except Exception as e:
-                    log.debug("status.restore_failed", name=name, error=str(e))
-
-        log.info(
-            "⏱️ TOOL_CALL_DURATION",
-            name=name, kind=self.registry.kind_of(name) or "?",
-            seconds=f"{dispatch_time:.2f}",
-        )
-
-        if result.get("ok"):
-            output = self._stringify_tool_output(result.get("result"))
-            log.info("✅ TOOL_CALL_SUCCESS", name=name, output_preview=output[:300])
-        else:
-            error_msg = result.get("error", "Unknown error")
-            output = f"Error: {error_msg}"
-            log.error("X TOOL_CALL_FAILED", name=name, error=error_msg)
-
-        if name == "mail_send" and result.get("ok"):
-            draft = _parse_mail_draft_preview(output)
-            if draft and self.on_mail_draft:
-                try:
-                    self.on_mail_draft(draft)
-                except Exception as e:
-                    log.debug("mail_draft_callback_failed", error=str(e))
-
-        if generation != self._connection_generation:
-            return  # An old session's action must never be replayed after reconnect.
-        output = output[:6000]
-        await self.send_event({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": output,
-            }
-        })
-
-        # Mark that we are expecting spoken output so _handle_response_event
-        # doesn't auto-cancel the model's reply after this tool call.
-        if continue_response:
-            await self.request_response()
-
-        log.info("tool_result", name=name, result=output[:200])
+        """Compatibility entry point for the extracted tool dispatcher."""
+        await self._tool_dispatcher.dispatch(data, continue_response=continue_response)
 
     async def _extract_and_maybe_store_memory(self, transcript: str) -> None:
         """Extract durable facts from user utterance and optionally store them.

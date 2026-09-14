@@ -8,6 +8,7 @@ import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..core.logging import StructuredLog
+from ..actions.mail_draft import parse_mail_draft_preview
 from .registry import REGISTRY
 
 log = StructuredLog(__name__)
@@ -324,9 +325,7 @@ a separate voice layer reads your final reply aloud. Therefore:
 
 def _try_parse_mail_draft(output: str) -> Optional[Dict[str, Any]]:
     try:
-        from ..core.realtime_session import _parse_mail_draft_preview
-
-        return _parse_mail_draft_preview(output)
+        return parse_mail_draft_preview(output)
     except Exception as e:  # pragma: no cover - defensive
         log.debug("orchestrator.mail_draft_parse_failed", error=str(e))
         return None

@@ -21,7 +21,9 @@ brew install portaudio           # audio driver
 cp .env.example .env              # add your OPENAI_API_KEY
 
 # 2. Start Qdrant (optional, for memory + Obsidian RAG)
-docker run -d -p 6333:6333 qdrant/qdrant
+cd ..
+make -C infra up
+cd jarvis_desktop
 
 # 3. Start the backend
 ./run.sh

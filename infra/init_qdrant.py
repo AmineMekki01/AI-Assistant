@@ -28,20 +28,26 @@ def main():
             if time.monotonic() >= deadline:
                 raise SystemExit(f'Qdrant is not ready at {URL}. Run make -C infra logs.')
             time.sleep(1)
-    names = (os.getenv('QDRANT_MEMORY_COLLECTION', 'long_term_memory'),
-             os.getenv('QDRANT_VAULT_COLLECTION', 'obsidian_vault'))
-    for name in names:
+    memory_collection = os.getenv('QDRANT_MEMORY_COLLECTION', 'long_term_memory')
+    vault_collection = os.getenv('QDRANT_VAULT_COLLECTION', 'obsidian_vault_hybrid')
+    collections = (
+        (memory_collection, {'vectors': {'size': DIMENSIONS, 'distance': 'Cosine'}},
+         [('user_id', 'keyword'), ('timestamp', 'datetime'), ('category', 'keyword'),
+          ('status', 'keyword'), ('importance', 'float')]),
+        (vault_collection, {
+            'vectors': {'dense': {'size': DIMENSIONS, 'distance': 'Cosine'}},
+            'sparse_vectors': {'bm25': {'modifier': 'idf'}},
+        }, [('vault', 'keyword'), ('path', 'keyword'), ('source', 'keyword')]),
+    )
+    for name, schema, fields in collections:
         try:
             existing = request(f'/collections/{name}')
-            vector = existing['result']['config']['params']['vectors']
-            if vector.get('size') != DIMENSIONS or vector.get('distance') != 'Cosine':
+            params = existing['result']['config']['params']
+            if params.get('vectors') != schema['vectors'] or (params.get('sparse_vectors') or {}) != schema.get('sparse_vectors', {}):
                 raise SystemExit(f'{name}: existing vector configuration differs; left untouched.')
         except HTTPError as error:
             if error.code != 404: raise
-            request(f'/collections/{name}', 'PUT', {'vectors': {'size': DIMENSIONS, 'distance': 'Cosine'}})
-        fields = [('user_id', 'keyword'), ('timestamp', 'datetime')]
-        if name == os.getenv('QDRANT_MEMORY_COLLECTION', 'long_term_memory'):
-            fields += [('category', 'keyword'), ('status', 'keyword'), ('importance', 'float')]
+            request(f'/collections/{name}', 'PUT', schema)
         for field, kind in fields:
             request(f'/collections/{name}/index?wait=true', 'PUT', {'field_name': field, 'field_schema': kind})
         print(f'Ready: {name} ({DIMENSIONS} dimensions, Cosine)')

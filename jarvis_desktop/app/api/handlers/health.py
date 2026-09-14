@@ -30,7 +30,7 @@ async def handle_health(request):
 async def handle_dashboard_health(request):
     """Return a consolidated integration snapshot for the settings dashboard."""
     from ...services.google_auth import load_google_credentials, token_path
-    from .storage import probe_qdrant_status
+    from .qdrant import probe_qdrant_status
 
     jarvis_dir = Path.home() / ".jarvis"
 
@@ -65,9 +65,6 @@ async def handle_dashboard_health(request):
         jarvis_dir / "apple_calendar_status.json",
         {"enabled": False, "available": False, "ok": None},
     )
-    # Availability is a platform capability, not the result of a previous
-    # permission probe.  A fresh macOS install has no cache file yet, but the
-    # integration must still be activatable so the user can run the probe.
     apple_status["available"] = sys.platform == "darwin"
 
     music_health = {"available": False, "librarySize": 0, "cacheFresh": False}

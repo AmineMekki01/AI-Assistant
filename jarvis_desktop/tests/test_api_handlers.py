@@ -12,6 +12,7 @@ from aiohttp import web
 from app.api import routes
 from app.api.handlers import health, google, settings, speaker, storage, system
 from app.core import config as config_module
+from app.knowledge.chunking import chunk_text
 from app.services import google_auth as google_auth_module
 
 
@@ -178,6 +179,7 @@ class FakeIndexingQdrantClient:
         self.args = args
         self.kwargs = kwargs
         self.create_collection_calls = []
+        self.delete_calls = []
         self.upsert_calls = []
         FakeIndexingQdrantClient.last_instance = self
 
@@ -186,6 +188,9 @@ class FakeIndexingQdrantClient:
 
     def create_collection(self, **kwargs):
         self.create_collection_calls.append(kwargs)
+
+    def delete(self, **kwargs):
+        self.delete_calls.append(kwargs)
 
     def upsert(self, **kwargs):
         self.upsert_calls.append(kwargs)
@@ -196,6 +201,12 @@ class FakePointStruct:
         self.id = id
         self.vector = vector
         self.payload = payload
+
+
+class FakeDocument:
+    def __init__(self, text, model):
+        self.text = text
+        self.model = model
 
 
 class FakeOpenAIEmbeddings:
@@ -223,8 +234,14 @@ def _install_fake_qdrant_modules(monkeypatch, client_cls):
     qdrant_module.QdrantClient = client_cls
     models_module = types.ModuleType("qdrant_client.models")
     models_module.Distance = SimpleNamespace(COSINE="cosine")
+    models_module.Modifier = SimpleNamespace(IDF="idf")
     models_module.VectorParams = lambda **kwargs: kwargs
+    models_module.SparseVectorParams = lambda **kwargs: kwargs
+    models_module.Document = FakeDocument
     models_module.PointStruct = FakePointStruct
+    models_module.FieldCondition = lambda **kwargs: kwargs
+    models_module.MatchValue = lambda **kwargs: kwargs
+    models_module.Filter = lambda **kwargs: kwargs
     monkeypatch.setitem(sys.modules, "qdrant_client", qdrant_module)
     monkeypatch.setitem(sys.modules, "qdrant_client.models", models_module)
 
@@ -561,8 +578,8 @@ async def test_system_metrics_handles_missing_location(temp_home, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_storage_helpers_and_routes(monkeypatch, temp_home):
-    assert storage._chunk_text("") == []
-    assert storage._chunk_text("one two") == ["one two"]
+    assert chunk_text("") == []
+    assert chunk_text("one two") == ["one two"]
 
     monkeypatch.setattr(storage, 'probe_qdrant_status', lambda: {'connected': False, 'collectionExists': False})
     response = await storage.handle_qdrant_status(FakeRequest())
@@ -640,7 +657,7 @@ async def test_qdrant_test_reports_backend_errors(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_obsidian_sync_validates_path_and_indexes_locally(temp_home, monkeypatch):
+async def test_obsidian_sync_validates_path_and_requires_qdrant(temp_home, monkeypatch):
     vault = temp_home / "vault"
     vault.mkdir()
     notes_dir = vault / "notes"
@@ -660,16 +677,9 @@ async def test_obsidian_sync_validates_path_and_indexes_locally(temp_home, monke
     monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(qdrant_url=None))
     response = await storage.handle_obsidian_sync(FakeRequest(payload={"vaultPath": str(vault), "autoSync": True, "syncInterval": 30}))
     payload = json.loads(response.text)
-    assert payload["success"] is True
-    assert payload["indexed"] >= 1
-    assert payload["qdrantStatus"] == "Saved to local JSON"
-
-    index_file = temp_home / ".jarvis" / "obsidian_index.json"
-    status_file = temp_home / ".jarvis" / "obsidian_status.json"
-    indexed = json.loads(index_file.read_text())
-    assert indexed[0]["metadata"]["source"] == "obsidian"
-    status = json.loads(status_file.read_text())
-    assert status["vaultPath"] == str(vault)
+    assert response.status == 503
+    assert payload["success"] is False
+    assert "Qdrant is not configured" in payload["error"]
 
 
 @pytest.mark.asyncio
@@ -694,10 +704,15 @@ async def test_obsidian_sync_indexes_to_qdrant(monkeypatch, temp_home):
 
     client = FakeIndexingQdrantClient.last_instance
     assert client.kwargs["url"] == "http://qdrant.test"
+    assert client.kwargs["cloud_inference"] is True
     assert len(client.create_collection_calls) == 1
+    assert set(client.create_collection_calls[0]["vectors_config"]) == {"dense"}
+    assert set(client.create_collection_calls[0]["sparse_vectors_config"]) == {"bm25"}
+    assert len(client.delete_calls) == 1
     assert len(client.upsert_calls) == 1
-    assert client.upsert_calls[0]["collection_name"] == "obsidian_vault"
+    assert client.upsert_calls[0]["collection_name"] == "obsidian_vault_hybrid"
     assert client.upsert_calls[0]["points"][0].payload["title"] == "note"
+    assert set(client.upsert_calls[0]["points"][0].vector) == {"dense", "bm25"}
 
     openai_client = FakeAsyncOpenAI.last_instance
     assert openai_client.api_key == "openai-key"

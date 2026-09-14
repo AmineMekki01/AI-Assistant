@@ -17,11 +17,15 @@ AssistantApplication
    ├── ActivationController
    ├── MailController
    ├── ReminderScheduler
-   └── RealtimeSession ── ToolRegistry
-                              ├── tools
-                              ├── actions
-                              ├── skills
-                              └── agents
+   └── RealtimeSession ── app/realtime/
+                              ├── persona context and prompt fragments
+                              ├── session configuration
+                              ├── tool dispatcher
+                              └── ToolRegistry
+                                  ├── tools
+                                  ├── actions
+                                  ├── skills
+                                  └── agents
 ```
 
 ## Ownership
@@ -45,6 +49,11 @@ calls through the registry.
 `WebSocketBridge` transports browser events and serves the small HTTP API. It
 does not reason, decide when a spoken turn ends, or maintain the conversation.
 
+`app/knowledge/` owns the Obsidian retrieval path. Its Markdown chunker creates
+contextual document chunks, its indexer writes dense and BM25 vectors to
+Qdrant, and its searcher fuses the two result lists. API handlers and agent
+tools call this package; they do not implement retrieval rules themselves.
+
 ## A voice turn
 
 1. The native listener hears the wake word, or accepts ordinary speech while a
@@ -65,5 +74,6 @@ is still active so one conversation owns all turns.
 - Put multi-step side effects in `app/actions/`.
 - Put delegated, tool-using reasoning workflows in `app/agents/`.
 - Keep storage and external I/O out of microphone and audio-playback loops.
+- Keep chunking, embedding, and Qdrant query details in `app/knowledge/`.
 - Do not add another conversation engine beside `RealtimeSession`; it is the
   source of truth for the live conversation.

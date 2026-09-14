@@ -60,8 +60,11 @@ class Settings:
     obsidian_vault_path: str = os.path.expanduser(os.getenv("OBSIDIAN_VAULT_PATH", "~/Documents/Obsidian"))
     
     qdrant_url: str = os.getenv("QDRANT_URL", "http://localhost:6333")
+    qdrant_api_key: str = os.getenv("QDRANT_API_KEY", "")
     qdrant_memory_collection: str = os.getenv("QDRANT_MEMORY_COLLECTION", "long_term_memory")
-    qdrant_vault_collection: str = os.getenv("QDRANT_VAULT_COLLECTION", "obsidian_vault")
+    # This new collection uses named dense and BM25 vectors.  The old
+    # ``obsidian_vault`` collection remains untouched for safe migration.
+    qdrant_vault_collection: str = os.getenv("QDRANT_VAULT_COLLECTION", "obsidian_vault_hybrid")
     
     jarvis_user_id: str = os.getenv("JARVIS_USER_ID", "user")
     speaker_verification_enabled: bool = _env_bool("JARVIS_SPEAKER_VERIFICATION_ENABLED", False)

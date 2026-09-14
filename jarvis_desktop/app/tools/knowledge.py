@@ -1,24 +1,16 @@
-"""Knowledge tools - RAG over the user's Obsidian vault via Qdrant.
-
-Sync is handled by the HTTP endpoint ``POST /api/obsidian/sync`` in
-``app/core/websocket_bridge.py`` (chunks, embeds with
-``text-embedding-3-small``, upserts into ``obsidian_vault``). These tools are
-the query side.
-"""
+"""Agent-facing tools for hybrid retrieval over the user's Obsidian vault."""
 
 from __future__ import annotations
 
 import os
-from typing import List
 
 import httpx
 from openai import AsyncOpenAI
 
+from ..knowledge.search import search_knowledge
 from ..runtime import tool
 
 
-VAULT_COLLECTION = os.getenv("QDRANT_VAULT_COLLECTION", "obsidian_vault")
-EMBED_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 UTILITY_MODEL = os.getenv("OPENAI_UTILITY_MODEL", "gpt-5.4-nano")
 
 
@@ -32,33 +24,9 @@ def _get_client() -> AsyncOpenAI:
     return _client
 
 
-def _qdrant_url() -> str:
-    return os.getenv("QDRANT_URL", "http://localhost:6333")
-
-
-async def _embed(text: str) -> List[float]:
-    resp = await _get_client().embeddings.create(model=EMBED_MODEL, input=text)
-    return resp.data[0].embedding
-
-
-async def _qdrant_search(vector: List[float], top_k: int) -> list[dict]:
-    async with httpx.AsyncClient() as http:
-        resp = await http.post(
-            f"{_qdrant_url()}/collections/{VAULT_COLLECTION}/points/search",
-            json={
-                "vector": vector,
-                "limit": 20,
-                "with_payload": True,
-            },
-            timeout=15.0,
-        )
-        if resp.status_code == 404:
-            raise RuntimeError(
-                f"Qdrant collection '{VAULT_COLLECTION}' not found. "
-                "Open Settings -> Integrations -> Obsidian and click Sync."
-            )
-        resp.raise_for_status()
-        return resp.json().get("result", []) or []
+async def _qdrant_search(query: str, top_k: int) -> list[dict]:
+    """Compatibility seam for the tool layer; the search lives in app.knowledge."""
+    return await search_knowledge(query, top_k)
 
 @tool(
     name="knowledge_search",
@@ -76,7 +44,7 @@ async def knowledge_search(query: str, top_k: int = 5) -> str:
     if not query:
         return "Please provide a search query."
     try:
-        hits = await _qdrant_search(await _embed(query), int(top_k or 5))
+        hits = await _qdrant_search(query, int(top_k or 5))
     except RuntimeError as e:
         return f"Error: {e}"
     except Exception as e: 
@@ -117,7 +85,7 @@ async def knowledge_ask(query: str, top_k: int = 5) -> str:
 
     top = int(top_k or 5)
     try:
-        hits = await _qdrant_search(await _embed(query), top)
+        hits = await _qdrant_search(query, top)
     except RuntimeError as e:
         return f"Error: {e}"
     except Exception as e: 
@@ -125,8 +93,6 @@ async def knowledge_ask(query: str, top_k: int = 5) -> str:
 
     if not hits:
         return f"I couldn't find anything in your Obsidian vault about '{query}'."
-
-    hits = [h for h in hits if (h.get("score") or 0) >= 0.15] or hits[:top]
 
     context_blocks = []
     sources: list[str] = []
@@ -171,9 +137,14 @@ async def knowledge_ask(query: str, top_k: int = 5) -> str:
     parameters={"type": "object", "properties": {}, "required": []},
 )
 async def knowledge_list() -> str:
+    from ..core.config import get_settings
+
+    settings = get_settings()
+    collection_name = settings.qdrant_vault_collection
+    qdrant_url = settings.qdrant_url.rstrip("/")
     async with httpx.AsyncClient() as http:
         resp = await http.post(
-            f"{_qdrant_url()}/collections/{VAULT_COLLECTION}/points/scroll",
+            f"{qdrant_url}/collections/{collection_name}/points/scroll",
             json={"limit": 256, "with_payload": True, "with_vector": False},
             timeout=15.0,
         )

@@ -6,9 +6,10 @@ Start Docker Desktop, then run from the repository root:
 make -C infra up
 ```
 
-This starts pinned Qdrant 1.17.1, waits for `/readyz`, and creates `long_term_memory`
-and `obsidian_vault` with 1536-dimensional cosine vectors and user/timestamp indexes.
-The backend's existing `QDRANT_URL=http://localhost:6333` and
+This starts pinned Qdrant 1.17.1, waits for `/readyz`, and creates
+`long_term_memory` plus `obsidian_vault_hybrid`. The knowledge collection has a
+named 1536-dimensional cosine `dense` vector and a Qdrant-native BM25 sparse
+vector. The backend's `QDRANT_URL=http://localhost:6333` and
 `OPENAI_EMBEDDING_MODEL=text-embedding-3-small` defaults match this setup.
 
 ```sh

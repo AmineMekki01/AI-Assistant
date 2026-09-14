@@ -11,9 +11,11 @@ from .apple_calendar import (
     handle_apple_calendar_status,
     handle_apple_calendar_list
 )
-from .storage import (
+from .qdrant import (
     handle_qdrant_status,
     handle_qdrant_test,
+)
+from .obsidian import (
     handle_obsidian_status,
     handle_obsidian_sync,
     _index_to_qdrant

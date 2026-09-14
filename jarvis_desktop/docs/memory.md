@@ -63,5 +63,6 @@ curl http://localhost:8001/api/qdrant/status
 ```
 
 The same Qdrant server also holds the Obsidian knowledge collection, whose name
-defaults to `obsidian_vault`. The two collections have separate purposes and
-should not be mixed.
+defaults to `obsidian_vault_hybrid`. The two collections have separate purposes
+and should not be mixed. See [Knowledge retrieval](knowledge.md) for its
+chunking, indexing, and hybrid-search design.

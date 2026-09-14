@@ -40,7 +40,9 @@ Set `OPENAI_API_KEY` in `.env`.
 Start Qdrant if you want long-term memory or Obsidian knowledge search:
 
 ```bash
-docker run -d --name jarvis-qdrant -p 6333:6333 qdrant/qdrant
+cd ..
+make -C infra up
+cd jarvis_desktop
 ```
 
 Start the backend:
@@ -75,8 +77,10 @@ The [documentation index](docs/README.md) links to the complete backend guide.
 | Understand the application structure | [Architecture](docs/architecture.md) |
 | Diagnose wake word, follow-up, cut-off, and verification issues | [Voice](docs/voice.md) |
 | Run and understand Qdrant memory | [Memory](docs/memory.md) |
+| Understand Obsidian chunking and hybrid search | [Knowledge retrieval](docs/knowledge.md) |
 | Add a tool, action, skill, or agent | [Capabilities](docs/capabilities.md) |
 | Configure and operate the backend | [Operations](docs/operations.md) |
+| Follow the remaining cleanup work | [Refactoring roadmap](docs/refactoring-roadmap.md) |
 
 ## Configuration
 
@@ -87,6 +91,7 @@ Copy `.env.example` to `.env`. The common settings are:
 | `OPENAI_API_KEY` | none | Required for Realtime, embeddings, and model calls. |
 | `OPENAI_REALTIME_MODEL` | `gpt-realtime-2.1-mini` | Live conversation model. |
 | `QDRANT_URL` | `http://localhost:6333` | Memory and knowledge database. |
+| `QDRANT_VAULT_COLLECTION` | `obsidian_vault_hybrid` | Named-vector collection for Obsidian search. |
 | `JARVIS_VOICE_FOLLOWUP_SECONDS` | `300` | How long ordinary speech may start the next turn. |
 | `JARVIS_VOICE_MAX_RECORDING_SECONDS` | `24` | Maximum native recording duration. |
 | `JARVIS_SPEAKER_VERIFICATION_ENABLED` | `false` | Require an enrolled owner voice before accepting a request. |
@@ -121,6 +126,7 @@ jarvis_desktop/
 ├── main.py                 launcher and compatibility adapter
 ├── app/
 │   ├── application/        composition root and application workflows
+│   ├── realtime/           session configuration and tool dispatch
 │   ├── voice/              wake word, capture, playback, and speaker checks
 │   ├── core/               Realtime session, bridge, configuration, logging
 │   ├── runtime/            capability registry and catalogue
