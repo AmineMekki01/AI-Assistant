@@ -32,7 +32,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173 and start talking.
+Open http://localhost:5175 and start talking.
 
 > **Tip:** Only `OPENAI_API_KEY` is required. Everything else (Google, Tavily, Qdrant, Obsidian) is optional and can be configured later in the Settings UI.
 

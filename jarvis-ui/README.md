@@ -27,7 +27,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173.
+Open http://localhost:5175.
 
 > The Vite dev server proxies WebSocket traffic to `ws://localhost:8000` automatically (see `vite.config.ts`). No CORS headaches.
 
